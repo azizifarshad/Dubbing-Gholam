@@ -1,0 +1,7 @@
+{
+  "name": "استودیو دوبله هوشمند فارسی",
+  "description": "سیستم خودکار ترجمه زیرنویس و ساخت صوت دوبله فارسی فیلم با هوش مصنوعی و همگام‌سازی زمانی",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
