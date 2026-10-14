@@ -136,7 +136,7 @@ export const FileUploaderSection: React.FC<FileUploaderSectionProps> = ({
           endTimeStr: secondsToSrtTime(seg.end),
           originalText: seg.text || `Spoken sentence ${idx + 1}`,
           farsiText: '',
-          voice: 'Puck',
+          voice: 'Iapetus',
           status: 'idle',
         }));
       } else {
@@ -151,7 +151,7 @@ export const FileUploaderSection: React.FC<FileUploaderSectionProps> = ({
             endTimeStr: secondsToSrtTime(seg.end),
             originalText: existingText || `دیالوگ صوتی خط ${idx + 1}`,
             farsiText: subtitles[idx]?.farsiText || '',
-            voice: subtitles[idx]?.voice || 'Puck',
+            voice: subtitles[idx]?.voice || 'Iapetus',
             status: subtitles[idx]?.farsiText ? 'translated' : 'idle',
           };
         });

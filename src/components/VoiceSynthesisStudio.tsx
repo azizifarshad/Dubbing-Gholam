@@ -49,7 +49,7 @@ export const VoiceSynthesisStudio: React.FC<VoiceSynthesisStudioProps> = ({
   onProceedToMixer,
   onOpenApiKeyModal,
 }) => {
-  const [selectedPersonaId, setSelectedPersonaId] = useState<string>('patient_teacher');
+  const [selectedPersonaId, setSelectedPersonaId] = useState<string>('iapetus_online_instructor');
   const [voiceEngine, setVoiceEngine] = useState<'gemini' | 'browser'>('gemini');
   const [isGeneratingAll, setIsGeneratingAll] = useState(false);
   const [currentGeneratingId, setCurrentGeneratingId] = useState<number | null>(null);
@@ -105,7 +105,7 @@ export const VoiceSynthesisStudio: React.FC<VoiceSynthesisStudioProps> = ({
 
     // If browser voice engine, speak text aloud with crystal-clear human speech
     if (voiceEngine === 'browser') {
-      const gender = sub.voice === 'Kore' ? 'female' : sub.voice === 'Fenrir' ? 'deep' : 'male';
+      const gender = sub.voice === 'Kore' ? 'female' : (sub.voice === 'Fenrir' || sub.voice === 'Iapetus') ? 'deep' : 'male';
       speakTextWithBrowser(
         sub.farsiText,
         gender,
@@ -476,27 +476,38 @@ export const VoiceSynthesisStudio: React.FC<VoiceSynthesisStudioProps> = ({
         </div>
       )}
 
-      {/* Google AI Studio Speech Persona Selector (The Patient Teacher & Presets) */}
+      {/* Google AI Studio Speech Persona Selector (Educational Online Course Instructors - 4 Male, 2 Female) */}
       <div className="mb-6 p-4 rounded-2xl bg-slate-950/70 border border-slate-800">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-          <label className="text-xs font-bold text-slate-200 flex items-center gap-2">
-            <GraduationCap className="w-4 h-4 text-amber-400" />
-            <span>پرسونای گفتاری هوش مصنوعی گوگل (AI Studio Speech Persona):</span>
-          </label>
-          <a
-            href="https://aistudio.google.com/generate-speech"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[11px] text-amber-400/80 hover:text-amber-300 flex items-center gap-1 transition"
-          >
-            <span>همانند ابزار Generate Speech گوگل</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
+          <div>
+            <label className="text-xs font-bold text-slate-200 flex items-center gap-2">
+              <GraduationCap className="w-4 h-4 text-amber-400" />
+              <span>پرسونای گفتاری هوش مصنوعی گوگل (AI Studio Speech Persona) - ویژه دوره‌های آنلاین:</span>
+            </label>
+            <p className="text-[11px] text-slate-400 mt-1">
+              طراحی اختصاصی برای تدریس و دوره‌های آموزشی (۴ صدای مرد و ۲ صدای زن با حضور Iapetus). لحن رادیویی و سینمایی حذف شده و کلمات تخصصی با شیواترین بیان ادا می‌شوند.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="px-2.5 py-1 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-300 text-[11px] font-medium">
+              ۴ مرد + ۲ زن
+            </span>
+            <a
+              href="https://aistudio.google.com/generate-speech"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-amber-400/80 hover:text-amber-300 flex items-center gap-1 transition"
+            >
+              <span>محیط Generate Speech گوگل</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {SPEECH_PERSONAS.map((p) => {
             const isSelected = selectedPersonaId === p.id;
+            const isMale = p.genderFa === 'مرد';
             return (
               <button
                 key={p.id}
@@ -509,18 +520,40 @@ export const VoiceSynthesisStudio: React.FC<VoiceSynthesisStudioProps> = ({
                   }));
                   onUpdateAllSubtitles(updated);
                 }}
-                className={`p-3 rounded-xl border text-right transition ${
+                className={`p-3.5 rounded-xl border text-right transition flex flex-col justify-between ${
                   isSelected
-                    ? 'bg-amber-500/15 border-amber-500 text-amber-200 shadow-md shadow-amber-500/10'
-                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    ? 'bg-amber-500/15 border-amber-500 text-amber-200 shadow-md shadow-amber-500/10 ring-1 ring-amber-500/30'
+                    : 'bg-slate-900/90 border-slate-800 text-slate-400 hover:border-slate-700 hover:bg-slate-900'
                 }`}
               >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-bold text-xs text-slate-100">{p.nameFa}</span>
-                  {isSelected && <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-xs text-slate-100">{p.nameFa}</span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded-md font-medium ${
+                          isMale
+                            ? 'bg-blue-500/15 text-blue-300 border border-blue-500/25'
+                            : 'bg-rose-500/15 text-rose-300 border border-rose-500/25'
+                        }`}
+                      >
+                        {p.genderFa}
+                      </span>
+                    </div>
+                    {isSelected && (
+                      <span className="px-2 py-0.5 rounded-md bg-amber-500 text-slate-950 font-bold text-[10px]">
+                        فعال
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-slate-400 leading-relaxed mb-2">
+                    {p.descriptionFa}
+                  </div>
                 </div>
-                <div className="text-[10px] text-slate-400 leading-relaxed line-clamp-2">
-                  {p.descriptionFa}
+
+                <div className="text-[10px] font-mono text-slate-500 flex items-center justify-between border-t border-slate-800/80 pt-1.5 mt-1">
+                  <span>شناسه AI Studio: {p.defaultVoice}</span>
+                  <span className="text-amber-400/70">لحن آموزشی</span>
                 </div>
               </button>
             );
@@ -647,29 +680,10 @@ export const VoiceSynthesisStudio: React.FC<VoiceSynthesisStudioProps> = ({
                       صداپیشه: {voiceMeta.nameFa}
                     </span>
 
-                    {/* 15% Word Count Indicator */}
-                    {(() => {
-                      const enWords = sub.originalText.trim().split(/\s+/).filter(Boolean).length;
-                      const faWords = sub.farsiText.trim().split(/\s+/).filter(Boolean).length;
-                      const diff = enWords > 0 ? Math.round((Math.abs(faWords - enWords) / enWords) * 100) : 0;
-                      const isGood = diff <= 15;
-                      return (
-                        <span
-                          className={`text-[11px] px-2 py-0.5 rounded-md font-sans font-mono ${
-                            isGood
-                              ? 'bg-emerald-950/50 text-emerald-300 border border-emerald-500/30'
-                              : 'bg-amber-950/50 text-amber-300 border border-amber-500/30'
-                          }`}
-                        >
-                          کلمات: {enWords} انگلیسی | {faWords} فارسی ({diff}٪ اختلاف)
-                        </span>
-                      );
-                    })()}
-
                     {hasAudio && sub.audioDuration && (
                       <span className="text-[11px] px-2 py-0.5 rounded-md font-sans flex items-center gap-1 bg-emerald-950/50 text-emerald-300 border border-emerald-500/30">
                         <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                        <span>سرعت ۱.۰x طبیعی و ثابت (طول صوت: {sub.audioDuration.toFixed(1)}s)</span>
+                        <span>سرعت ۱.۰x استاندارد دوره آنلاین (طول صوت: {sub.audioDuration.toFixed(1)}s)</span>
                       </span>
                     )}
 

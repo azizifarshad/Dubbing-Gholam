@@ -1,3 +1,5 @@
+export type GeminiVoiceId = 'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Zephyr' | 'Iapetus';
+
 export interface SubtitleItem {
   id: number;
   start: number; // in seconds
@@ -6,7 +8,7 @@ export interface SubtitleItem {
   endTimeStr: string;   // e.g. "00:00:04,500"
   originalText: string;
   farsiText: string;
-  voice: 'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Zephyr';
+  voice: GeminiVoiceId;
   emotion?: string;
   audioBase64?: string;
   audioBlobUrl?: string;
@@ -16,7 +18,7 @@ export interface SubtitleItem {
 }
 
 export interface VoiceOption {
-  id: 'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Zephyr';
+  id: GeminiVoiceId;
   nameFa: string;
   genderFa: string;
   descriptionFa: string;
@@ -25,85 +27,115 @@ export interface VoiceOption {
 
 export const AVAILABLE_VOICES: VoiceOption[] = [
   {
+    id: 'Iapetus',
+    nameFa: 'ایپتوس (Iapetus)',
+    genderFa: 'مرد',
+    descriptionFa: 'صدای مردانه عمیق، مقتدر، رسا و مطمئن؛ ادای دقیق مفاهیم تخصصی و آموزشی',
+    color: 'blue',
+  },
+  {
+    id: 'Fenrir',
+    nameFa: 'فنریر (Fenrir)',
+    genderFa: 'مرد',
+    descriptionFa: 'صدای مردانه گرم، باوقار، شمرده و مسلط؛ تدریس قدم‌به‌قدم با لحن استادانه',
+    color: 'amber',
+  },
+  {
+    id: 'Charon',
+    nameFa: 'کارون (Charon)',
+    genderFa: 'مرد',
+    descriptionFa: 'صدای مردانه آکادمیک، پخته، جدی و تحلیلی؛ انتقال عمیق مباحث پیچیده',
+    color: 'purple',
+  },
+  {
     id: 'Puck',
     nameFa: 'پوک (Puck)',
     genderFa: 'مرد',
-    descriptionFa: 'صدای مردانه پرانرژی، جوان و مناسب کاراکترهای اصلی و پرتحرک',
+    descriptionFa: 'صدای مردانه پویا، تعاملی و پرانرژی؛ آموزش جذاب و همراه با انگیزه',
     color: 'emerald',
   },
   {
     id: 'Kore',
     nameFa: 'کوره (Kore)',
     genderFa: 'زن',
-    descriptionFa: 'صدای زنانه گرم، دلنشین، رسا و مناسب نقش‌های زنانه و عاطفی',
+    descriptionFa: 'صدای زنانه شیوا، صبور، شفاف و ترغیب‌کننده؛ ایده‌آل برای تدریس صمیمی و مفهومی',
     color: 'rose',
-  },
-  {
-    id: 'Fenrir',
-    nameFa: 'فنریر (Fenrir)',
-    genderFa: 'مرد',
-    descriptionFa: 'صدای مردانه عمیق، سینمایی، بم و مناسب کاراکترهای مقتدر و اکشن',
-    color: 'amber',
   },
   {
     id: 'Zephyr',
     nameFa: 'زفیر (Zephyr)',
-    genderFa: 'خنثی / ملایم',
-    descriptionFa: 'صدای متعادل، روان، شیوا و مناسب راوی و دیالوگ‌های آرام',
+    genderFa: 'زن',
+    descriptionFa: 'صدای زنانه متین، روشن، با آهنگ کلام منظم و استاندارد دوره‌های بین‌المللی',
     color: 'cyan',
-  },
-  {
-    id: 'Charon',
-    nameFa: 'کارون (Charon)',
-    genderFa: 'مرد',
-    descriptionFa: 'صدای پخته، جدی، سنگین و کلاسیک برای شخصیت‌های مسن‌تر یا جدی',
-    color: 'purple',
   },
 ];
 
-export type TranslationStyle = 'colloquial' | 'cinematic' | 'formal' | 'energetic';
+export type TranslationStyle = 'colloquial' | 'educational' | 'formal';
 
 export interface SpeechPersona {
   id: string;
   nameEn: string;
   nameFa: string;
-  defaultVoice: 'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Zephyr';
+  genderFa: 'مرد' | 'زن';
+  defaultVoice: GeminiVoiceId;
   stylePrompt: string;
   descriptionFa: string;
 }
 
 export const SPEECH_PERSONAS: SpeechPersona[] = [
   {
-    id: 'patient_teacher',
-    nameEn: 'The Patient Teacher',
-    nameFa: 'The Patient Teacher (معلم صبور و شیوا)',
-    defaultVoice: 'Kore',
-    stylePrompt: 'The Patient Teacher: Patient, articulate, warm, clear enunciation, measured pacing, calm and encouraging tone',
-    descriptionFa: 'سبک معروف هوش مصنوعی گوگل (Generate Speech) با لحن آرام، شمرده، تلفظ دقیق، رسا و گوش‌نواز',
+    id: 'iapetus_online_instructor',
+    nameEn: 'Iapetus (Tech Course Lead)',
+    nameFa: 'ایپتوس (مدرس ارشد و فنی)',
+    genderFa: 'مرد',
+    defaultVoice: 'Iapetus',
+    stylePrompt: 'Top-tier tech course instructor, masculine, authoritative yet conversational, precise enunciation of code and technical terms, measured pacing, confident pedagogical delivery, engaging and never theatrical',
+    descriptionFa: 'مدرس مسلط بر مباحث فنی؛ تلفظ بی‌نقص لغات تخصصی با بیان مقتدر و روان دوره‌های روز دنیا',
   },
   {
-    id: 'cinematic_dubber',
-    nameEn: 'The Cinematic Dubber',
-    nameFa: 'The Cinematic Dubber (دوبلور سینمایی)',
-    defaultVoice: 'Puck',
-    stylePrompt: 'Theatrical, dramatic, cinematic movie dubbing actor, emotive, immersive and natural',
-    descriptionFa: 'لحن دراماتیک، زنده و پرانرژی مناسب برای نقش‌های اول و سکانس‌های اکشن',
-  },
-  {
-    id: 'deep_storyteller',
-    nameEn: 'The Deep Storyteller',
-    nameFa: 'The Deep Storyteller (راوی حماسی و بم)',
+    id: 'fenrir_senior_mentor',
+    nameEn: 'Fenrir (Senior Mentor)',
+    nameFa: 'فنریر (منتور باتجربه)',
+    genderFa: 'مرد',
     defaultVoice: 'Fenrir',
-    stylePrompt: 'Deep, resonant, cinematic storytelling, authoritative, majestic and atmospheric',
-    descriptionFa: 'صدای بم، گیرا و پرصلابت برای راوی یا شخصیت‌های مقتدر',
+    stylePrompt: 'Senior online mentor, warm masculine tone, patient and thorough explanation, steady teaching cadence, friendly guidance, crystal-clear pronunciation',
+    descriptionFa: 'لحن گرم و راهنمای منتور آموزشی؛ شمرده، قابل فهم، باوقار و اطمینان‌بخش برای یادگیری گام‌به‌گام',
   },
   {
-    id: 'calm_broadcaster',
-    nameEn: 'The Calm Broadcaster',
-    nameFa: 'The Calm Broadcaster (گوینده ملایم و رادیویی)',
+    id: 'charon_academic_lecturer',
+    nameEn: 'Charon (Academic Lecturer)',
+    nameFa: 'کارون (استاد مفاهیم پایه و معماری)',
+    genderFa: 'مرد',
+    defaultVoice: 'Charon',
+    stylePrompt: 'Deep analytical professor, clear articulation, intellectual depth, structured lecture rhythm, calm enunciation, focused purely on educational clarity',
+    descriptionFa: 'بیان سنجیده و آکادمیک برای انتقال سرفصل‌های پایه‌ای، الگوهای طراحی و مفاهیم سنگین',
+  },
+  {
+    id: 'puck_interactive_coach',
+    nameEn: 'Puck (Interactive Coach)',
+    nameFa: 'پوک (مربی پویا و ورکشاپ)',
+    genderFa: 'مرد',
+    defaultVoice: 'Puck',
+    stylePrompt: 'Dynamic interactive boot-camp instructor, clear enthusiastic delivery, conversational teaching style, crisp pronunciation, engaging without being radio or broadcasty',
+    descriptionFa: 'آموزش پرانرژی و تعاملی؛ حفظ تمرکز دانشجو در بوت‌کمپ‌ها و پروژه‌های عملی با لحن زنده و صمیمی',
+  },
+  {
+    id: 'kore_master_educator',
+    nameEn: 'Kore (Master Educator)',
+    nameFa: 'کوره (مدرس صبور و مفهومی)',
+    genderFa: 'زن',
+    defaultVoice: 'Kore',
+    stylePrompt: 'Master educator, warm feminine voice, patient, clear enunciation, gentle encouragement, natural pedagogical rhythm, articulate explanation of complex topics',
+    descriptionFa: 'سبک مشهور آموزش استاندارد؛ بیانی صبورانه، شمرده، عاری از هرگونه اغراق و کاملاً قابل درک',
+  },
+  {
+    id: 'zephyr_methodology_trainer',
+    nameEn: 'Zephyr (Structured Trainer)',
+    nameFa: 'زفیر (مدرس ساختاریافته و استاندارد)',
+    genderFa: 'زن',
     defaultVoice: 'Zephyr',
-    stylePrompt: 'Smooth, balanced, articulate radio broadcaster, calm and conversational rhythm',
-    descriptionFa: 'بیان روان و متین برای دیالوگ‌های آرام، مستند و آموزشی',
+    stylePrompt: 'Modern online course trainer, smooth feminine voice, articulate cadence, clear vocal inflection, clean pronunciation of terminology, balanced tempo',
+    descriptionFa: 'تدریس استاندارد و مدرن دوره‌های آنلاین؛ ادای شفاف سیلاب‌ها، وزن کلام یکدست و تمرکز بر یادگیری سریع',
   },
 ];
 
@@ -116,22 +148,17 @@ export interface StyleOption {
 export const TRANSLATION_STYLES: StyleOption[] = [
   {
     id: 'colloquial',
-    titleFa: 'محاوره‌ای طبیعی (دوبله فیلم‌های محبوب)',
-    descFa: 'روان، صمیمی، اصطلاحات روزمره و متناسب با لب‌خوانی طبیعی',
+    titleFa: 'محاوره‌ای آموزشی (مانند بهترین دوره‌های آنلاین)',
+    descFa: 'روان، صمیمی، استادانه، حفظ تلفظ اصلی واژگان تخصصی و بدون اغراق سینمایی',
   },
   {
-    id: 'cinematic',
-    titleFa: 'سینمایی فاخر و کلاسیک',
-    descFa: 'لحن شکوهمند دوبلاژ طلایی ایران، با کلمات سنجیده و ادبی‌تر',
-  },
-  {
-    id: 'energetic',
-    titleFa: 'پرهیجان و کمدی / انیمیشن',
-    descFa: 'لحن شاداب با تکیه‌کلام‌های جذاب و تند برای کارتون و اکشن',
+    id: 'educational',
+    titleFa: 'تخصصی و گام‌به‌گام (تدریس فنی و کدنویسی)',
+    descFa: 'دقیق، شفاف و رسا؛ بیان استاندارد مفاهیم برنامه‌نویسی و اصطلاحات مهندسی',
   },
   {
     id: 'formal',
-    titleFa: 'رسمی و مستند',
-    descFa: 'دقیق، بدون اصطلاحات کوچه بازاری برای فیلم‌های مستند و علمی',
+    titleFa: 'رسمی و دانشگاهی',
+    descFa: 'ساختاریافته و متین برای دوره‌ها و ارائه‌های سازمانی و آکادمیک',
   },
 ];

@@ -260,7 +260,7 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
               }
 
               spokenLineIdsRef.current.add(sub.id);
-              const gender = sub.voice === 'Kore' ? 'female' : sub.voice === 'Fenrir' ? 'deep' : 'male';
+              const gender = sub.voice === 'Kore' ? 'female' : (sub.voice === 'Fenrir' || sub.voice === 'Iapetus') ? 'deep' : 'male';
               speakTextWithBrowser(sub.farsiText, gender);
             }
           }

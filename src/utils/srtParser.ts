@@ -98,7 +98,7 @@ export function parseSrt(srtContent: string): SubtitleItem[] {
       endTimeStr,
       originalText,
       farsiText: '',
-      voice: 'Puck',
+      voice: 'Iapetus',
       status: 'idle',
     });
   }
