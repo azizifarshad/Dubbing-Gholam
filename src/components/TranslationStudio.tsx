@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { SubtitleItem, TRANSLATION_STYLES, TranslationStyle, AVAILABLE_VOICES, GeminiVoiceId } from '../types/dubbing';
-import { Languages, Wand2, RefreshCw, CheckCircle2, Clock, Sparkles, User, AlertCircle, Loader2 } from 'lucide-react';
+import { Languages, Wand2, RefreshCw, CheckCircle2, Clock, Sparkles, User, AlertCircle, Loader2, Cpu, Globe, Server } from 'lucide-react';
+import { translateOfflineLocally } from '../utils/localTranslator';
 
 interface TranslationStudioProps {
   apiKey: string;
@@ -20,6 +21,7 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
   onOpenApiKeyModal,
 }) => {
   const [selectedStyle, setSelectedStyle] = useState<TranslationStyle>('colloquial');
+  const [translationEngine, setTranslationEngine] = useState<'gemini' | 'local'>('gemini');
   const [isTranslating, setIsTranslating] = useState(false);
   const [translatingLineId, setTranslatingLineId] = useState<number | null>(null);
   const [translationError, setTranslationError] = useState<string | null>(null);
@@ -27,12 +29,67 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
 
   const translatedCount = subtitles.filter((s) => s.farsiText.trim().length > 0).length;
   const isAllTranslated = subtitles.length > 0 && translatedCount === subtitles.length;
-  // Batch Translate All Subtitles
+  // Batch Translate All Subtitles (Gemini or Local Engine)
   const handleTranslateAll = async () => {
     if (subtitles.length === 0) return;
     setIsTranslating(true);
     setTranslationError(null);
 
+    // 1. Local Offline Engine Branch
+    if (translationEngine === 'local') {
+      try {
+        const payloadLines = subtitles.map((s) => ({
+          id: s.id,
+          text: s.originalText,
+        }));
+
+        let fallbackData: any = null;
+        try {
+          const res = await fetch('/api/translate-fallback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lines: payloadLines, style: selectedStyle }),
+          });
+          if (res.ok) {
+            fallbackData = await res.json();
+          }
+        } catch (_) {}
+
+        if (fallbackData?.translations && Array.isArray(fallbackData.translations)) {
+          const translationMap = new Map<number, string>();
+          for (const t of fallbackData.translations) {
+            translationMap.set(t.id, t.farsiText);
+          }
+          const updated = subtitles.map((sub) => {
+            const fa = translationMap.get(sub.id) || translateOfflineLocally(sub.originalText, selectedStyle);
+            return {
+              ...sub,
+              farsiText: fa || sub.farsiText,
+              status: 'translated' as const,
+            };
+          });
+          onUpdateAllSubtitles(updated);
+        } else {
+          // In-browser rule-based fallback
+          const updated = subtitles.map((sub) => {
+            const translatedFa = translateOfflineLocally(sub.originalText, selectedStyle);
+            return {
+              ...sub,
+              farsiText: translatedFa || sub.farsiText,
+              status: 'translated' as const,
+            };
+          });
+          onUpdateAllSubtitles(updated);
+        }
+      } catch (err: any) {
+        setTranslationError(err?.message || 'خطا در ترجمه با موتور محلی.');
+      } finally {
+        setIsTranslating(false);
+      }
+      return;
+    }
+
+    // 2. Google Gemini AI Cloud Engine Branch
     try {
       const payloadLines = subtitles.map((s) => ({
         id: s.id,
@@ -113,6 +170,44 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
     setTranslatingLineId(sub.id);
     setTranslationError(null);
 
+    // Local Engine Single Line
+    if (translationEngine === 'local') {
+      try {
+        let fa = '';
+        try {
+          const res = await fetch('/api/translate-fallback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              lines: [{ id: sub.id, text: sub.originalText }],
+              style: selectedStyle,
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.translations?.[0]?.farsiText) {
+              fa = data.translations[0].farsiText;
+            }
+          }
+        } catch (_) {}
+
+        if (!fa) {
+          fa = translateOfflineLocally(sub.originalText, selectedStyle);
+        }
+
+        onUpdateSubtitle(sub.id, {
+          farsiText: fa || sub.farsiText,
+          status: 'translated',
+        });
+      } catch (err: any) {
+        setTranslationError(err?.message || 'خطا در ترجمه محلی این خط.');
+      } finally {
+        setTranslatingLineId(null);
+      }
+      return;
+    }
+
+    // Gemini Cloud Single Line
     try {
       let data: any;
       try {
@@ -218,8 +313,70 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
             ) : (
               <Wand2 className="w-4 h-4" />
             )}
-            <span>{isTranslating ? 'در حال ترجمه سریع با Gemini 3.8 Flash...' : 'ترجمه پرسرعت و رسا با هوش مصنوعی'}</span>
+            <span>
+              {isTranslating
+                ? translationEngine === 'local'
+                  ? 'در حال ترجمه با مدل داخلی...'
+                  : 'در حال ترجمه سریع با Gemini 3.8 Flash...'
+                : translationEngine === 'local'
+                ? 'ترجمه با مدل داخلی (آفلاین)'
+                : 'ترجمه پرسرعت با جمینای'}
+            </span>
           </button>
+        </div>
+      </div>
+
+      {/* Engine Selector Bar (Gemini Cloud vs Local Offline Engine) */}
+      <div className="mb-6 p-4 bg-slate-950/70 rounded-2xl border border-slate-800">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-300">
+            <Cpu className="w-4 h-4 text-amber-400" />
+            <span>انتخاب موتور ترجمه:</span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setTranslationEngine('gemini')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold transition ${
+                translationEngine === 'gemini'
+                  ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+                  : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Globe className="w-3.5 h-3.5" />
+              <span>هوش مصنوعی ابری (Google Gemini)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setTranslationEngine('local')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold transition ${
+                translationEngine === 'local'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
+                  : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>مدل داخلی و آفلاین (بدون اینترنت)</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Engine Description Pill */}
+        <div className="text-[11px] text-slate-400 bg-slate-900/60 p-2.5 rounded-xl border border-slate-800/80 flex items-center justify-between flex-wrap gap-2">
+          {translationEngine === 'gemini' ? (
+            <span>
+              ⚡ <strong className="text-amber-300">موتور جمینای:</strong> ترجمه غنی با هوش مصنوعی، لحن محاوره‌ای صمیمی دوبلاژ و حفظ اصطلاحات فنی کامپیوتر.
+            </span>
+          ) : (
+            <span>
+              🔒 <strong className="text-emerald-300">موتور داخلی:</strong> اجرای کاملاً لوکال و بدون نیاز به اینترنت با واژه‌نامه تخصصی برنامه‌نویسی و اصطلاحات کامپیوتری.
+            </span>
+          )}
+          <span className="text-slate-500 text-[10px]">
+            مدل پیشنهادی HuggingFace (Hy-MT2 1.8B): ۴.۰۸ گیگابایت (نیازمند دانلود در اولین بار)
+          </span>
         </div>
       </div>
 

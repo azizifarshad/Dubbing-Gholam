@@ -85,6 +85,19 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
   const [renderProgressMsg, setRenderProgressMsg] = useState('');
   const [renderError, setRenderError] = useState<string | null>(null);
 
+  // Synchronize state when sharedAudioBuffer or sharedWavBlob from parent changes
+  useEffect(() => {
+    if (sharedAudioBuffer) {
+      setRenderedMixBuffer(sharedAudioBuffer);
+    }
+  }, [sharedAudioBuffer]);
+
+  useEffect(() => {
+    if (sharedWavBlob) {
+      setRenderedWavBlob(sharedWavBlob);
+    }
+  }, [sharedWavBlob]);
+
   // Audio nodes references
   const audioCtxRef = useRef<AudioContext | null>(null);
   const masterSourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -319,6 +332,44 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     }
   };
 
+  // Manual trigger to immediately force rebuild the master output mix
+  const handleForceReRenderMix = async () => {
+    const hasVoices = subtitles.some((s) => Boolean(s.audioBase64));
+    if (!hasVoices && !originalAudioBuffer) return;
+
+    setIsRenderingMix(true);
+    setRenderError(null);
+    setRenderProgressMsg('در حال رندر و میکس مجدد فایل خروجی...');
+
+    try {
+      const result = await renderDubbedTrack(
+        {
+          originalBuffer: originalAudioBuffer,
+          subtitles,
+          mixMode,
+          persianVolume,
+          backgroundVolume,
+          duckingAmount,
+        },
+        (pct, msg) => {
+          setRenderProgressMsg(msg);
+        }
+      );
+      setRenderedMixBuffer(result.audioBuffer);
+      setRenderedWavBlob(result.wavBlob);
+      setIsRenderingMix(false);
+      onMixRendered?.(result);
+
+      if (isPlayingRef.current) {
+        startPlayback(currentTimeRef.current);
+      }
+    } catch (err: any) {
+      console.error('Force mix render failed:', err);
+      setRenderError(err.message || 'خطا در رندر فایل صوتی خروجی');
+      setIsRenderingMix(false);
+    }
+  };
+
   // Direct download of the current rendered mix right from Stage 4 with exact video/srt base name
   const handleDownloadCurrentMix = () => {
     if (!renderedWavBlob) return;
@@ -403,6 +454,17 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
               <span>دانلود خروجی میکس ({effectiveBaseName}.wav)</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={handleForceReRenderMix}
+            disabled={isRenderingMix}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-semibold transition disabled:opacity-50"
+            title="میکس و به‌روزرسانی مجدد فایل خروجی با آخرین تغییرات صداها"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isRenderingMix ? 'animate-spin' : ''}`} />
+            <span>میکس مجدد صداها</span>
+          </button>
         </div>
       </div>
 
