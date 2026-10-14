@@ -12,14 +12,19 @@ import {
   Radio,
   Layers,
   Mic2,
+  Tag,
 } from 'lucide-react';
 import { exportToSrt, formatPlayerTime } from '../utils/srtParser';
 import { renderDubbedTrack } from '../utils/audioMixer';
+import { deriveProjectOutputName } from '../utils/fileNaming';
 
 interface ExportStudioProps {
   subtitles: SubtitleItem[];
   originalAudioBuffer: AudioBuffer | null;
   originalAudioName: string;
+  subtitleFileName?: string;
+  outputBaseName?: string;
+  onChangeOutputBaseName?: (name: string) => void;
   mixMode: 'ducking' | 'isolated' | 'full_mix';
   persianVolume: number;
   backgroundVolume: number;
@@ -33,6 +38,9 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({
   subtitles,
   originalAudioBuffer,
   originalAudioName,
+  subtitleFileName,
+  outputBaseName,
+  onChangeOutputBaseName,
   mixMode,
   persianVolume,
   backgroundVolume,
@@ -100,25 +108,42 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({
     }
   };
 
-  // Download Rendered WAV File
+  const defaultBaseName = deriveProjectOutputName(originalAudioName, subtitleFileName);
+  const [customBaseName, setCustomBaseName] = useState<string>(outputBaseName || defaultBaseName);
+
+  React.useEffect(() => {
+    if (outputBaseName && outputBaseName !== customBaseName) {
+      setCustomBaseName(outputBaseName);
+    } else if (!customBaseName && defaultBaseName) {
+      setCustomBaseName(defaultBaseName);
+    }
+  }, [outputBaseName, defaultBaseName]);
+
+  const effectiveBaseName = (customBaseName || defaultBaseName || 'persian_dub').trim();
+
+  const handleBaseNameChange = (val: string) => {
+    setCustomBaseName(val);
+    onChangeOutputBaseName?.(val);
+  };
+
+  // Download Rendered WAV File with exact input video/srt base name
   const handleDownloadWav = () => {
     if (!renderedWavBlob) return;
     const a = document.createElement('a');
     a.href = URL.createObjectURL(renderedWavBlob);
-    const modeTag = mixMode === 'ducking' ? 'Ducked-Mix' : mixMode === 'isolated' ? 'Persian-Only' : 'Full-Mix';
-    a.download = `Persian-Dub-${modeTag}-${Date.now()}.wav`;
+    a.download = `${effectiveBaseName}.wav`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
   };
 
-  // Download Persian SRT
-  const handleDownloadSrt = () => {
+  // Download Persian SRT with exact input video/srt base name
+  const handleDownloadSrt = (withLangCode = false) => {
     const srtContent = exportToSrt(subtitles);
     const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `Persian-Dub-Subtitles-${Date.now()}.srt`;
+    a.download = `${effectiveBaseName}${withLangCode ? '.fa.srt' : '.srt'}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -175,6 +200,49 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({
         </div>
       )}
 
+      {/* Output File Naming Synchronization Bar */}
+      <div className="mb-6 p-4 bg-slate-950/80 rounded-2xl border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+            <Tag className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+              <span>نام فایل‌های خروجی:</span>
+              <span className="text-[11px] font-normal text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md">
+                همنام با فایل ورودی
+              </span>
+            </div>
+            <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
+              فایل‌های خروجی صوتی (WAV) و زیرنویس (SRT) دقیقاً با همین نام ذخیره می‌شوند تا در نرم‌افزارهای تدوین و پخش‌کننده‌ها به‌صورت خودکار در کنار ویدیو لود شوند.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 self-stretch md:self-auto">
+          <div className="flex items-center bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-2 focus-within:border-amber-500 transition w-full md:w-auto">
+            <input
+              type="text"
+              value={customBaseName}
+              onChange={(e) => handleBaseNameChange(e.target.value)}
+              placeholder="نام فایل ورودی"
+              className="bg-transparent text-xs text-amber-300 font-mono focus:outline-none w-full md:w-56 ltr text-left"
+            />
+            <span className="text-[11px] text-slate-500 font-mono mr-1.5 shrink-0">.wav/.srt</span>
+          </div>
+          {customBaseName !== defaultBaseName && defaultBaseName && (
+            <button
+              type="button"
+              onClick={() => handleBaseNameChange(defaultBaseName)}
+              className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[11px] border border-slate-700 transition shrink-0"
+              title="بازنشانی به نام اولیه ورودی"
+            >
+              بازنشانی
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Ready Downloads Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-6">
         {/* 1. Download Dubbed WAV Card */}
@@ -223,10 +291,11 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({
             type="button"
             onClick={handleDownloadWav}
             disabled={!renderedWavBlob}
-            className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-slate-950 font-bold text-xs transition shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+            className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-slate-950 font-bold text-xs transition shadow-lg shadow-emerald-500/20 disabled:opacity-50 font-mono"
+            title={`دانلود صوت دوبله فارسی با نام ${effectiveBaseName}.wav`}
           >
             <Download className="w-4 h-4" />
-            <span>دانلود فایل صوتی دوبله (WAV)</span>
+            <span>دانلود فایل صوتی دوبله ({effectiveBaseName}.wav)</span>
           </button>
         </div>
 
@@ -250,15 +319,27 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handleDownloadSrt}
-            disabled={subtitles.length === 0}
-            className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs border border-slate-700 transition disabled:opacity-50"
-          >
-            <Download className="w-4 h-4" />
-            <span>دانلود زیرنویس فارسی (.srt)</span>
-          </button>
+          <div className="flex flex-col sm:flex-row gap-2 mt-4">
+            <button
+              type="button"
+              onClick={() => handleDownloadSrt(false)}
+              disabled={subtitles.length === 0}
+              className="flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs border border-slate-700 transition disabled:opacity-50 font-mono"
+              title={`دانلود زیرنویس دقیقاً همنام: ${effectiveBaseName}.srt`}
+            >
+              <Download className="w-4 h-4" />
+              <span>دانلود زیرنویس ({effectiveBaseName}.srt)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDownloadSrt(true)}
+              disabled={subtitles.length === 0}
+              className="flex items-center justify-center gap-1 py-3 px-3 rounded-xl bg-slate-850 hover:bg-slate-800 text-slate-300 hover:text-amber-300 font-mono text-[11px] border border-slate-700 transition disabled:opacity-50 shrink-0"
+              title={`دانلود با پسوند استاندارد زبان: ${effectiveBaseName}.fa.srt`}
+            >
+              <span>.fa.srt</span>
+            </button>
+          </div>
         </div>
       </div>
 

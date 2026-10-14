@@ -27,11 +27,14 @@ import {
   renderDubbedTrack,
   audioBufferToWav,
 } from '../utils/audioMixer';
+import { deriveProjectOutputName } from '../utils/fileNaming';
 
 interface TimelinePlayerProps {
   subtitles: SubtitleItem[];
   originalAudioBuffer: AudioBuffer | null;
   originalAudioName: string;
+  subtitleFileName?: string;
+  outputBaseName?: string;
   mixMode: 'ducking' | 'isolated' | 'full_mix';
   onChangeMixMode: (mode: 'ducking' | 'isolated' | 'full_mix') => void;
   persianVolume: number;
@@ -49,6 +52,8 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
   subtitles,
   originalAudioBuffer,
   originalAudioName,
+  subtitleFileName,
+  outputBaseName,
   mixMode,
   onChangeMixMode,
   persianVolume,
@@ -61,6 +66,10 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
   sharedWavBlob,
   sharedAudioBuffer,
 }) => {
+  const effectiveBaseName =
+    (outputBaseName || '').trim() ||
+    deriveProjectOutputName(originalAudioName, subtitleFileName) ||
+    'persian_dub';
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
@@ -310,18 +319,12 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     }
   };
 
-  // Direct download of the current rendered mix right from Stage 4
+  // Direct download of the current rendered mix right from Stage 4 with exact video/srt base name
   const handleDownloadCurrentMix = () => {
     if (!renderedWavBlob) return;
     const a = document.createElement('a');
     a.href = URL.createObjectURL(renderedWavBlob);
-    const modeTag =
-      mixMode === 'ducking'
-        ? 'Ducked-Mix'
-        : mixMode === 'isolated'
-        ? 'Persian-Only'
-        : 'Full-Mix';
-    a.download = `Persian-Dub-Output-${modeTag}-${Date.now()}.wav`;
+    a.download = `${effectiveBaseName}.wav`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -393,11 +396,11 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
             <button
               type="button"
               onClick={handleDownloadCurrentMix}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 hover:text-amber-200 text-xs font-semibold transition shadow-sm"
-              title="دانلود فایل میکس فعلی به عنوان خروجی WAV"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 hover:text-amber-200 text-xs font-semibold transition shadow-sm font-mono"
+              title={`دانلود فایل صوتی میکس نهایی همنام با فایل ورودی: ${effectiveBaseName}.wav`}
             >
               <Download className="w-3.5 h-3.5" />
-              <span>دانلود خروجی میکس (WAV)</span>
+              <span>دانلود خروجی میکس ({effectiveBaseName}.wav)</span>
             </button>
           )}
         </div>

@@ -7,6 +7,7 @@ import { TranslationStudio } from './components/TranslationStudio';
 import { VoiceSynthesisStudio } from './components/VoiceSynthesisStudio';
 import { TimelinePlayer } from './components/TimelinePlayer';
 import { ExportStudio } from './components/ExportStudio';
+import { extractCleanBaseName, deriveProjectOutputName } from './utils/fileNaming';
 
 import {
   FileText,
@@ -42,6 +43,7 @@ export default function App() {
   const [originalAudioBlobUrl, setOriginalAudioBlobUrl] = useState<string | null>(null);
 
   // 4. Mixing & Audio Output State
+  const [outputBaseName, setOutputBaseName] = useState<string>('');
   const [mixMode, setMixMode] = useState<'ducking' | 'isolated' | 'full_mix'>('ducking');
   const [persianVolume, setPersianVolume] = useState<number>(1.0);
   const [backgroundVolume, setBackgroundVolume] = useState<number>(0.2);
@@ -82,7 +84,10 @@ export default function App() {
   const handleSubtitlesLoaded = (items: SubtitleItem[], fileName: string) => {
     setSubtitles(items);
     setSubtitleFileName(fileName);
-    // User manually navigates between steps when ready
+    const clean = extractCleanBaseName(fileName);
+    if (clean && (!outputBaseName || outputBaseName === 'persian_dub')) {
+      setOutputBaseName(clean);
+    }
   };
 
   const handleAudioLoaded = (buffer: AudioBuffer, fileName: string, fileBlobUrl: string) => {
@@ -90,6 +95,10 @@ export default function App() {
     setOriginalAudioName(fileName);
     setOriginalAudioDuration(buffer.duration);
     setOriginalAudioBlobUrl(fileBlobUrl);
+    const clean = extractCleanBaseName(fileName);
+    if (clean) {
+      setOutputBaseName(clean);
+    }
   };
 
   const handleUpdateSubtitle = (id: number, partial: Partial<SubtitleItem>) => {
@@ -273,6 +282,8 @@ export default function App() {
               subtitles={subtitles}
               originalAudioBuffer={originalAudioBuffer}
               originalAudioName={originalAudioName}
+              subtitleFileName={subtitleFileName}
+              outputBaseName={outputBaseName}
               mixMode={mixMode}
               onChangeMixMode={setMixMode}
               persianVolume={persianVolume}
@@ -297,6 +308,9 @@ export default function App() {
               subtitles={subtitles}
               originalAudioBuffer={originalAudioBuffer}
               originalAudioName={originalAudioName}
+              subtitleFileName={subtitleFileName}
+              outputBaseName={outputBaseName}
+              onChangeOutputBaseName={setOutputBaseName}
               mixMode={mixMode}
               persianVolume={persianVolume}
               backgroundVolume={backgroundVolume}

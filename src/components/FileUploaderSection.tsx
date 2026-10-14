@@ -40,6 +40,7 @@ import {
   optimizeAndAlignSubtitlesWithAudio,
   AudioSpeechSegment
 } from '../utils/audioVAD';
+import { extractCleanBaseName } from '../utils/fileNaming';
 
 interface FileUploaderSectionProps {
   apiKey: string;
@@ -232,7 +233,10 @@ export const FileUploaderSection: React.FC<FileUploaderSectionProps> = ({
       srtData = subtitles.map(s => `${s.id}\n${s.startTimeStr} --> ${s.endTimeStr}\n${s.originalText}`).join('\n\n');
     }
     if (!srtData) return;
-    const fileName = lastUploadedVideoFile ? lastUploadedVideoFile.name.replace(/\.[^/.]+$/, '') + '.srt' : 'english_subtitles.srt';
+    const base = lastUploadedVideoFile
+      ? extractCleanBaseName(lastUploadedVideoFile.name)
+      : extractCleanBaseName(originalAudioName);
+    const fileName = `${base || 'english_subtitles'}.srt`;
     triggerFileDownload(new Blob([srtData], { type: 'text/plain;charset=utf-8' }), fileName);
   };
 
