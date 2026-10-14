@@ -7,8 +7,7 @@ import { TranslationStudio } from './components/TranslationStudio';
 import { VoiceSynthesisStudio } from './components/VoiceSynthesisStudio';
 import { TimelinePlayer } from './components/TimelinePlayer';
 import { ExportStudio } from './components/ExportStudio';
-import { parseSrt, SAMPLE_SRT_CONTENT } from './utils/srtParser';
-import { generateDemoBackgroundAudio } from './utils/audioMixer';
+
 import {
   FileText,
   Languages,
@@ -80,7 +79,7 @@ export default function App() {
   const handleSubtitlesLoaded = (items: SubtitleItem[], fileName: string) => {
     setSubtitles(items);
     setSubtitleFileName(fileName);
-    setActiveStep(2); // Jump to translation
+    // User manually navigates between steps when ready
   };
 
   const handleAudioLoaded = (buffer: AudioBuffer, fileName: string, fileBlobUrl: string) => {
@@ -98,24 +97,6 @@ export default function App() {
 
   const handleUpdateAllSubtitles = (items: SubtitleItem[]) => {
     setSubtitles(items);
-  };
-
-  // Instant 1-Click Demo Loader
-  const handleLoadDemoSample = async () => {
-    const parsed = parseSrt(SAMPLE_SRT_CONTENT);
-    setSubtitles(parsed);
-    setSubtitleFileName('sample-action-movie-scene.srt');
-
-    try {
-      const demoAudio = await generateDemoBackgroundAudio(25);
-      setOriginalAudioBuffer(demoAudio);
-      setOriginalAudioName('موسیقی و صدای متن فیلم (نمونه اکشن)');
-      setOriginalAudioDuration(demoAudio.duration);
-    } catch (err) {
-      console.error(err);
-    }
-
-    setActiveStep(2);
   };
 
   // Progress stats
@@ -254,7 +235,7 @@ export default function App() {
               originalAudioName={originalAudioName}
               originalAudioDuration={originalAudioDuration}
               onAudioLoaded={handleAudioLoaded}
-              onLoadDemoSample={handleLoadDemoSample}
+              onProceedToTranslation={() => setActiveStep(2)}
               isProcessingAudio={false}
             />
           </div>

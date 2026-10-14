@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { SubtitleItem, TRANSLATION_STYLES, TranslationStyle, AVAILABLE_VOICES, GeminiVoiceId } from '../types/dubbing';
-import { Languages, Wand2, RefreshCw, CheckCircle2, Clock, Sparkles, User, AlertCircle, Loader2, Code2 } from 'lucide-react';
+import { Languages, Wand2, RefreshCw, CheckCircle2, Clock, Sparkles, User, AlertCircle, Loader2 } from 'lucide-react';
 
 interface TranslationStudioProps {
   apiKey: string;
@@ -27,61 +27,6 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
 
   const translatedCount = subtitles.filter((s) => s.farsiText.trim().length > 0).length;
   const isAllTranslated = subtitles.length > 0 && translatedCount === subtitles.length;
-
-  // Instant fallback dubbing script for standard action/movie lines without consuming API quota
-  const handleLoadSuggestedDubbing = () => {
-    const suggestedMap: Record<number, { text: string; voice: any; emotion: string }> = {
-      1: {
-        text: 'هی جان، مطمئنی اینجا جای درسته؟',
-        voice: 'Kore',
-        emotion: 'کنجکاو و نگران',
-      },
-      2: {
-        text: 'به من اعتماد کن سارا. سیگنال دقیقاً از داخل همین اتاق میاد.',
-        voice: 'Puck',
-        emotion: 'با اطمینان و جدی',
-      },
-      3: {
-        text: 'قبل از اینکه نگهبانا سر برسن وقت زیادی نداریم. زود باش عجله کن!',
-        voice: 'Kore',
-        emotion: 'مضطرب و سریع',
-      },
-      4: {
-        text: 'اون کنسول رو ببین! به نظر میاد کل سیستم قفلش باز شده.',
-        voice: 'Fenrir',
-        emotion: 'هیجان‌زده و غافلگیر',
-      },
-      5: {
-        text: 'کارت حرف نداشت! فایل‌های محرمانه رو سریع دانلود کن تا از اینجا بزنیم به چاک.',
-        voice: 'Puck',
-        emotion: 'راضی و پرانرژی',
-      },
-    };
-
-    const updated = subtitles.map((sub, idx) => {
-      const match = suggestedMap[sub.id] || suggestedMap[idx + 1];
-      if (match) {
-        return {
-          ...sub,
-          farsiText: match.text,
-          voice: match.voice || sub.voice,
-          emotion: match.emotion || 'طبیعی',
-          status: 'translated' as const,
-        };
-      } else if (!sub.farsiText.trim()) {
-        return {
-          ...sub,
-          farsiText: `دیالوگ فارسی خط شماره ${idx + 1}`,
-          status: 'translated' as const,
-        };
-      }
-      return sub;
-    });
-
-    onUpdateAllSubtitles(updated);
-    setTranslationError(null);
-  };
-
   // Batch Translate All Subtitles
   const handleTranslateAll = async () => {
     if (subtitles.length === 0) return;
@@ -153,14 +98,11 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
           setTranslationError(data.notice);
         }
       } else {
-        // Fallback to local suggested dubbing with technical terms preserved
-        handleLoadSuggestedDubbing();
-        setTranslationError('متن‌های محاوره‌ای دوبله با موفقیت بارگذاری شدند (موتور آفلاین فعال شد).');
+        setTranslationError(data?.error || data?.message || 'خطا در دریافت ترجمه از هوش مصنوعی.');
       }
     } catch (err: any) {
       console.warn('Translation error caught:', err);
-      handleLoadSuggestedDubbing();
-      setTranslationError('متن‌های محاوره‌ای دوبله آماده استفاده شدند.');
+      setTranslationError(err.message || 'خطا در برقراری ارتباط با سرویس ترجمه هوش مصنوعی.');
     } finally {
       setIsTranslating(false);
     }
@@ -266,15 +208,6 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
             </span>
           </div>
 
-          <button
-            type="button"
-            onClick={handleLoadSuggestedDubbing}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold transition"
-            title="پر کردن سریع با متن فارسی دوبله بدون مصرف سهمیه"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            <span>متن پیشنهادی دوبله (آفلاین)</span>
-          </button>
 
           <button
             type="button"
@@ -353,24 +286,7 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
         </div>
       </div>
 
-      {/* Colloquial Tone & Technical IT Terms Preservation Notice */}
-      <div className="mb-6 px-4 py-3 bg-gradient-to-r from-blue-950/40 via-slate-900 to-emerald-950/30 border border-blue-500/30 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
-            <Code2 className="w-4 h-4" />
-          </div>
-          <div>
-            <span className="font-bold text-slate-100 block sm:inline">لحن محاوره‌ای استاندارد و حفظ اصطلاحات فنی کامپیوتر:</span>{' '}
-            <span className="text-slate-300">
-              واژگان تخصصی برنامه‌نویسی و IT ترجمه لغوی نمی‌شوند (مثلاً <code className="bg-slate-950 px-1.5 py-0.5 rounded text-amber-300 font-mono">magic method</code> به «متد جادویی» ترجمه نشده و به عنوان «مجیک متد» حفظ می‌شود؛ همچنین متد، کلاس، فانکشن، باگ، دیباگ، آبجکت، آرایه، فریم‌ورک و... به شکل اصلی ادا می‌شوند).
-            </span>
-          </div>
-        </div>
-        <span className="text-[11px] text-emerald-400 font-semibold bg-emerald-950/60 border border-emerald-500/30 px-2.5 py-1 rounded-lg shrink-0 flex items-center gap-1">
-          <CheckCircle2 className="w-3.5 h-3.5" />
-          فعال در تمام ترجمه‌ها
-        </span>
-      </div>
+
       {translationError && (
         <div className="mb-6 p-4 rounded-2xl bg-amber-950/40 border border-amber-500/50 text-amber-200 text-xs shadow-lg">
           <div className="flex items-center gap-2 font-bold text-amber-300 mb-1.5">
@@ -378,7 +294,7 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
             <span>{translationError}</span>
           </div>
           <p className="text-slate-300 leading-relaxed mb-3">
-            اگر سهمیه روزانه یا دقیقه‌ای پلن رایگان به اتمام رسیده است، می‌توانید یک کلید جدید وارد کنید یا با کلیک روی دکمه زیر متن پیشنهادی دوبله را بارگذاری نمایید تا بدون وقفه به مرحله تولید صدا بروید:
+            اگر سهمیه روزانه یا دقیقه‌ای پلن رایگان به اتمام رسیده است، می‌توانید با کلیک روی دکمه زیر یک کلید جدید وارد کنید:
           </p>
           <div className="flex flex-wrap items-center gap-2">
             {onOpenApiKeyModal && (
@@ -390,14 +306,6 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
                 تنظیم کلید جدید API
               </button>
             )}
-            <button
-              type="button"
-              onClick={handleLoadSuggestedDubbing}
-              className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold transition text-xs flex items-center gap-1.5"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>بارگذاری متن پیشنهادی دوبله (آفلاین)</span>
-            </button>
           </div>
         </div>
       )}

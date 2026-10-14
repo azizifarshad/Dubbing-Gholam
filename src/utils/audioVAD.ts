@@ -155,3 +155,125 @@ export async function createLightweightWavBlob(
   const resampled = await offlineCtx.startRendering();
   return audioBufferToWav(resampled);
 }
+
+/**
+ * Optimizes subtitle timings using physical audio waveform speech analysis (VAD)
+ * to snap dialogue boundaries to real human speech and strictly prevent overlapping/collision
+ * between consecutive voice lines.
+ */
+export function optimizeAndAlignSubtitlesWithAudio(
+  subtitles: SubtitleItem[],
+  audioBuffer: AudioBuffer,
+  options?: {
+    minGapSec?: number;
+  }
+): {
+  optimizedSubtitles: SubtitleItem[];
+  adjustedCount: number;
+  collisionResolvedCount: number;
+} {
+  const minGap = options?.minGapSec ?? 0.25; // 250ms safety cushion to prevent voice collision
+  const speechSegments = detectSpeechSegmentsFromAudioBuffer(audioBuffer);
+
+  let adjustedCount = 0;
+  let collisionResolvedCount = 0;
+
+  // Case 1: Existing subtitles provided -> Align to speech and prevent collisions
+  if (subtitles.length > 0) {
+    const updated: SubtitleItem[] = subtitles.map((item) => ({ ...item }));
+
+    for (let i = 0; i < updated.length; i++) {
+      const cur = updated[i];
+      const origStart = cur.start;
+      const origEnd = cur.end;
+
+      // Find best matching speech segment overlapping or near this subtitle line
+      const matched = speechSegments.find(
+        (seg) => Math.max(seg.start, cur.start) < Math.min(seg.end, cur.end) ||
+                 (Math.abs(seg.start - cur.start) < 1.2 && Math.abs(seg.end - cur.end) < 1.5)
+      );
+
+      if (matched) {
+        // Snap start/end to physical audio speech boundaries if reasonable
+        const newStart = parseFloat(Math.max(0, matched.start).toFixed(2));
+        const newEnd = parseFloat(Math.min(audioBuffer.duration, matched.end).toFixed(2));
+        if (newEnd > newStart + 0.3) {
+          cur.start = newStart;
+          cur.end = newEnd;
+          if (Math.abs(newStart - origStart) > 0.15 || Math.abs(newEnd - origEnd) > 0.15) {
+            adjustedCount++;
+          }
+        }
+      }
+    }
+
+    // Pass 2: Strictly enforce collision prevention between consecutive lines
+    for (let i = 0; i < updated.length - 1; i++) {
+      const current = updated[i];
+      const next = updated[i + 1];
+
+      // If current ends too close to or after the start of the next line, trim current
+      if (current.end > next.start - minGap) {
+        const safeEnd = parseFloat(Math.max(current.start + 0.4, next.start - minGap).toFixed(2));
+        if (safeEnd < current.end) {
+          current.end = safeEnd;
+          collisionResolvedCount++;
+        } else if (safeEnd >= next.start) {
+          // If spacing is still cramped, shift next slightly forward if buffer allows
+          next.start = parseFloat((current.end + minGap).toFixed(2));
+          if (next.end <= next.start) {
+            next.end = parseFloat((next.start + 1.0).toFixed(2));
+          }
+          collisionResolvedCount++;
+        }
+      }
+
+      current.startTimeStr = secondsToSrtTime(current.start);
+      current.endTimeStr = secondsToSrtTime(current.end);
+    }
+
+    // Format last item
+    if (updated.length > 0) {
+      const last = updated[updated.length - 1];
+      last.startTimeStr = secondsToSrtTime(last.start);
+      last.endTimeStr = secondsToSrtTime(last.end);
+    }
+
+    return {
+      optimizedSubtitles: updated,
+      adjustedCount,
+      collisionResolvedCount,
+    };
+  }
+
+  // Case 2: No subtitles loaded -> Generate brand new dialogue items from detected speech
+  const generated: SubtitleItem[] = speechSegments.map((seg, idx) => ({
+    id: idx + 1,
+    start: seg.start,
+    end: seg.end,
+    startTimeStr: secondsToSrtTime(seg.start),
+    endTimeStr: secondsToSrtTime(seg.end),
+    originalText: `دیالوگ گفتاری ${idx + 1} (${seg.start.toFixed(1)}s - ${seg.end.toFixed(1)}s)`,
+    farsiText: '',
+    voice: 'Iapetus',
+    status: 'idle',
+  }));
+
+  // Enforce collision spacing
+  for (let i = 0; i < generated.length - 1; i++) {
+    const cur = generated[i];
+    const nxt = generated[i + 1];
+    if (cur.end > nxt.start - minGap) {
+      cur.end = parseFloat((nxt.start - minGap).toFixed(2));
+      cur.endTimeStr = secondsToSrtTime(cur.end);
+      collisionResolvedCount++;
+    }
+  }
+
+  return {
+    optimizedSubtitles: generated,
+    adjustedCount: generated.length,
+    collisionResolvedCount,
+  };
+}
+

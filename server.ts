@@ -1,6 +1,9 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -11,6 +14,411 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+// Video to WAV extraction endpoint using FFmpeg (PCM 16-bit, 44100Hz, Stereo)
+// Accepts raw video binary payload up to 300MB
+app.post(
+  '/api/convert-video-to-wav',
+  express.raw({ type: () => true, limit: '300mb' }),
+  async (req: Request, res: Response) => {
+    const rawExt = typeof req.query.ext === 'string' ? req.query.ext.replace(/[^a-zA-Z0-9]/g, '') : 'mp4';
+    const inputExt = rawExt || 'mp4';
+    const tempId = `video_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const tempInputPath = path.join(os.tmpdir(), `${tempId}.${inputExt}`);
+    const tempOutputPath = path.join(os.tmpdir(), `${tempId}.wav`);
+
+    try {
+      const fileBuffer = req.body;
+      if (!fileBuffer || !Buffer.isBuffer(fileBuffer) || fileBuffer.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'فایل ویدیو دریافت نشد یا فرمت ارسالی خالی است.',
+        });
+      }
+
+      await fs.promises.writeFile(tempInputPath, fileBuffer);
+
+      // Determine FFmpeg binary location
+      let ffmpegBin = 'ffmpeg';
+      if (fs.existsSync('/usr/bin/ffmpeg')) {
+        ffmpegBin = '/usr/bin/ffmpeg';
+      }
+
+      // Exact FFmpeg command as requested:
+      // ffmpeg -i <input> -vn -acodec pcm_s16le -ar 44100 -ac 2 -y <output.wav>
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(ffmpegBin, [
+          '-i',
+          tempInputPath,
+          '-vn',
+          '-acodec',
+          'pcm_s16le',
+          '-ar',
+          '44100',
+          '-ac',
+          '2',
+          '-y',
+          tempOutputPath,
+        ]);
+
+        let stderr = '';
+        proc.stderr.on('data', (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        proc.on('close', (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            console.error('[FFmpeg Process Error Stderr]:', stderr);
+            reject(new Error(`کد خطای FFmpeg (${code}): ${stderr.slice(-300)}`));
+          }
+        });
+
+        proc.on('error', (err) => {
+          reject(new Error(`عدم امکان اجرای FFmpeg: ${err.message}`));
+        });
+      });
+
+      if (!fs.existsSync(tempOutputPath)) {
+        throw new Error('فایل خروجی صوتی WAV تولید نشد.');
+      }
+
+      const wavBuffer = await fs.promises.readFile(tempOutputPath);
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Disposition', `attachment; filename="${tempId}.wav"`);
+      res.send(wavBuffer);
+    } catch (err: any) {
+      console.error('[Video to WAV Error]:', err);
+      res.status(500).json({
+        success: false,
+        error: err.message || 'خطا در تبدیل ویدیو به صوت WAV با FFmpeg',
+      });
+    } finally {
+      // Clean up temporary files
+      try {
+        if (fs.existsSync(tempInputPath)) await fs.promises.unlink(tempInputPath);
+      } catch {}
+      try {
+        if (fs.existsSync(tempOutputPath)) await fs.promises.unlink(tempOutputPath);
+      } catch {}
+    }
+  }
+);
+
+// Endpoint to extract embedded subtitle tracks (.srt) directly from video files via FFmpeg
+app.post(
+  '/api/extract-video-subtitles',
+  express.raw({ type: ['video/*', 'application/octet-stream', 'multipart/form-data'], limit: '500mb' }),
+  async (req: Request, res: Response) => {
+    const tempId = 'sub_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+    const tempInputPath = path.join(os.tmpdir(), `${tempId}.video`);
+    const tempOutputSrtPath = path.join(os.tmpdir(), `${tempId}.srt`);
+
+    try {
+      const fileBuffer = req.body;
+      if (!fileBuffer || !Buffer.isBuffer(fileBuffer) || fileBuffer.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'فایل ویدیو دریافت نشد یا خالی است.',
+        });
+      }
+
+      await fs.promises.writeFile(tempInputPath, fileBuffer);
+
+      let ffmpegBin = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
+      let ffprobeBin = fs.existsSync('/usr/bin/ffprobe') ? '/usr/bin/ffprobe' : 'ffprobe';
+
+      // 1. Probe for subtitle streams
+      const probeResult = await new Promise<{ streams: any[] }>((resolve) => {
+        const proc = spawn(ffprobeBin, [
+          '-v', 'error',
+          '-select_streams', 's',
+          '-show_entries', 'stream=index,codec_name:stream_tags=language,title',
+          '-of', 'json',
+          tempInputPath
+        ]);
+
+        let stdout = '';
+        proc.stdout.on('data', (d) => { stdout += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0 && stdout) {
+            try {
+              resolve(JSON.parse(stdout));
+            } catch {
+              resolve({ streams: [] });
+            }
+          } else {
+            resolve({ streams: [] });
+          }
+        });
+        proc.on('error', () => resolve({ streams: [] }));
+      });
+
+      const streams = probeResult.streams || [];
+      if (streams.length === 0) {
+        return res.json({
+          success: false,
+          reason: 'no_embedded_subs',
+          message: 'هیچ ترک زیرنویس نهفته‌ای در این فایل ویدیویی یافت نشد. می‌توانید از هوش مصنوعی یا اسکریپت Whisper Large-v3 محلی برای استخراج زیرنویس استفاده نمایید.',
+        });
+      }
+
+      // Find best match: English if available, or first subtitle stream
+      let targetStreamIdx = 0;
+      const engIdx = streams.findIndex((s) => {
+        const lang = (s.tags?.language || '').toLowerCase();
+        return lang === 'eng' || lang === 'en';
+      });
+      if (engIdx !== -1) {
+        targetStreamIdx = engIdx;
+      }
+
+      // 2. Extract subtitle to SRT format
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(ffmpegBin, [
+          '-i', tempInputPath,
+          '-map', `0:s:${targetStreamIdx}`,
+          '-c:s', 'srt',
+          '-y',
+          tempOutputSrtPath
+        ]);
+
+        let stderr = '';
+        proc.stderr.on('data', (c) => { stderr += c.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`خطا در استخراج زیرنویس (${code}): ${stderr.slice(-200)}`));
+        });
+        proc.on('error', (err) => reject(new Error(`خطای اجرای FFmpeg: ${err.message}`)));
+      });
+
+      if (!fs.existsSync(tempOutputSrtPath)) {
+        return res.json({
+          success: false,
+          reason: 'conversion_failed',
+          message: 'استخراج ترک زیرنویس به فرمت SRT ناموفق بود.',
+        });
+      }
+
+      const srtContent = await fs.promises.readFile(tempOutputSrtPath, 'utf-8');
+      return res.json({
+        success: true,
+        srtText: srtContent,
+        streamCount: streams.length,
+        selectedStreamLanguage: streams[targetStreamIdx]?.tags?.language || 'نامشخص',
+      });
+    } catch (err: any) {
+      console.error('[Extract Video Subtitles Error]:', err);
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'خطا در خواندن زیرنویس از ویدیو',
+      });
+    } finally {
+      try {
+        if (fs.existsSync(tempInputPath)) await fs.promises.unlink(tempInputPath);
+      } catch {}
+      try {
+        if (fs.existsSync(tempOutputSrtPath)) await fs.promises.unlink(tempOutputSrtPath);
+      } catch {}
+    }
+  }
+);
+
+// Helper to format seconds to SRT timestamp: 00:00:01,250
+function formatSrtTimestamp(seconds: number): string {
+  const totalMs = Math.round(Math.max(0, seconds) * 1000);
+  const hrs = Math.floor(totalMs / 3600000);
+  const mins = Math.floor((totalMs % 3600000) / 60000);
+  const secs = Math.floor((totalMs % 60000) / 1000);
+  const ms = totalMs % 1000;
+  return (
+    String(hrs).padStart(2, '0') +
+    ':' +
+    String(mins).padStart(2, '0') +
+    ':' +
+    String(secs).padStart(2, '0') +
+    ',' +
+    String(ms).padStart(3, '0')
+  );
+}
+
+// Endpoint to automatically extract English subtitles (.srt) directly from video using FFmpeg audio extraction + Gemini Speech AI
+app.post(
+  '/api/transcribe-video-to-srt',
+  express.raw({ type: ['video/*', 'audio/*', 'application/octet-stream', 'multipart/form-data'], limit: '500mb' }),
+  async (req: Request, res: Response) => {
+    const tempId = 'vid_stt_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+    const tempInputVideo = path.join(os.tmpdir(), `${tempId}.video`);
+    const tempAudioMp3 = path.join(os.tmpdir(), `${tempId}.mp3`);
+    const customKey = (req.headers['x-gemini-api-key'] as string) || (req.query.apiKey as string);
+
+    try {
+      const fileBuffer = req.body;
+      if (!fileBuffer || !Buffer.isBuffer(fileBuffer) || fileBuffer.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'فایل ویدیو دریافت نشد یا خالی است.',
+        });
+      }
+
+      await fs.promises.writeFile(tempInputVideo, fileBuffer);
+
+      let ffmpegBin = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
+
+      // 1. Extract audio stream to compact, high-clarity 16kHz mono MP3
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(ffmpegBin, [
+          '-i', tempInputVideo,
+          '-vn',
+          '-acodec', 'libmp3lame',
+          '-ar', '16000',
+          '-ac', '1',
+          '-b:a', '64k',
+          '-y',
+          tempAudioMp3,
+        ]);
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`خطا در استخراج صدای ویدیو با FFmpeg (${code}): ${stderr.slice(-200)}`));
+        });
+        proc.on('error', (err) => reject(new Error(`خطای اجرای FFmpeg: ${err.message}`)));
+      });
+
+      if (!fs.existsSync(tempAudioMp3)) {
+        throw new Error('فایل صوتی استخراج شده تولید نشد.');
+      }
+
+      const audioBuffer = await fs.promises.readFile(tempAudioMp3);
+      const audioBase64 = audioBuffer.toString('base64');
+
+      // 2. Transcribe speech using Gemini Multimodal Audio Model
+      const ai = getGenAIClient(customKey);
+
+      const promptText = `You are a world-class speech-to-text and subtitle synchronization engine (equivalent to Whisper Large-v3 with high-resolution alignment).
+Listen to the English spoken audio carefully.
+Extract every spoken English sentence/dialogue with PRECISE start and end timestamps in seconds.
+Requirements:
+1. Provide accurate start time (seconds) and end time (seconds) for each dialogue line.
+2. Segment sentences naturally (typically 2 to 7 seconds each) suitable for video subtitles and dubbing.
+3. Transcribe exact spoken words without hallucination or omitting words.
+4. Correct punctuation and capitalization for clean educational/instructional subtitles.
+5. Strict JSON output adhering to the schema.`;
+
+      const transcribeSchema = {
+        type: Type.OBJECT,
+        properties: {
+          segments: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.INTEGER, description: 'Segment index starting from 1' },
+                start: { type: Type.NUMBER, description: 'Start time in seconds (e.g. 1.25)' },
+                end: { type: Type.NUMBER, description: 'End time in seconds (e.g. 4.80)' },
+                text: { type: Type.STRING, description: 'Transcribed English dialogue' },
+              },
+              required: ['id', 'start', 'end', 'text'],
+            },
+          },
+        },
+        required: ['segments'],
+      };
+
+      const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
+      let lastError: any;
+      let transcriptionResponse: any;
+
+      for (const model of candidateModels) {
+        try {
+          transcriptionResponse = await callWithRetry(() =>
+            ai.models.generateContent({
+              model,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'audio/mp3',
+                        data: audioBase64,
+                      },
+                    },
+                    {
+                      text: promptText,
+                    },
+                  ],
+                },
+              ],
+              config: {
+                responseMimeType: 'application/json',
+                responseSchema: transcribeSchema,
+              },
+            })
+          );
+          if (transcriptionResponse?.text) break;
+        } catch (err: any) {
+          lastError = err;
+          if (isAuthenticationError(err)) throw err;
+          continue;
+        }
+      }
+
+      if (!transcriptionResponse?.text) {
+        throw lastError || new Error('مدل هوش مصنوعی پاسخی برای تبدیل گفتار ویدیو ارسال نکرد.');
+      }
+
+      const parsed = JSON.parse(transcriptionResponse.text);
+      const rawSegments = parsed.segments || [];
+
+      // Generate SRT text format & SubtitleItem array
+      const subtitles = rawSegments.map((seg: any, idx: number) => {
+        const id = idx + 1;
+        const startSec = typeof seg.start === 'number' ? seg.start : 0;
+        const endSec = typeof seg.end === 'number' ? Math.max(seg.end, startSec + 1) : startSec + 2;
+        const startStr = formatSrtTimestamp(startSec);
+        const endStr = formatSrtTimestamp(endSec);
+        return {
+          id,
+          startTime: startStr,
+          endTime: endStr,
+          text: (seg.text || '').trim(),
+          startSeconds: startSec,
+          endSeconds: endSec,
+        };
+      });
+
+      const srtBlocks = subtitles.map((s: any) => `${s.id}\n${s.startTime} --> ${s.endTime}\n${s.text}`).join('\n\n');
+
+      return res.json({
+        success: true,
+        srtText: srtBlocks,
+        subtitles,
+        count: subtitles.length,
+        notice: `زیرنویس انگلیسی با هوش مصنوعی و انطباق صوتی بالا استخراج شد (${subtitles.length} خط دیالوگ).`,
+      });
+    } catch (err: any) {
+      console.error('[Transcribe Video to SRT Error]:', err);
+      const { isRateLimited, isDailyLimit, retryAfterSeconds } = extractRateLimitInfo(err);
+      return res.status(isRateLimited ? 429 : 500).json({
+        success: false,
+        isRateLimited,
+        isDailyLimit,
+        retryAfterSeconds,
+        error: err.message || 'خطا در تبدیل ویدیوی ارسالی به زیرنویس با هوش مصنوعی',
+      });
+    } finally {
+      try {
+        if (fs.existsSync(tempInputVideo)) await fs.promises.unlink(tempInputVideo);
+      } catch {}
+      try {
+        if (fs.existsSync(tempAudioMp3)) await fs.promises.unlink(tempAudioMp3);
+      } catch {}
+    }
+  }
+);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
