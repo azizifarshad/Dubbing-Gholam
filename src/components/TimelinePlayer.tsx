@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { SubtitleItem, AVAILABLE_VOICES } from '../types/dubbing';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { SubtitleItem } from '../types/dubbing';
 import {
   Play,
   Pause,
@@ -15,10 +15,18 @@ import {
   Radio,
   FastForward,
   Rewind,
+  Download,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  RefreshCw,
 } from 'lucide-react';
 import { formatPlayerTime } from '../utils/srtParser';
-import { getAudioContext, decodeBase64ToAudioBuffer } from '../utils/audioMixer';
-import { speakTextWithBrowser, stopBrowserSpeech } from '../utils/offlineVoiceSynthesizer';
+import {
+  getAudioContext,
+  renderDubbedTrack,
+  audioBufferToWav,
+} from '../utils/audioMixer';
 
 interface TimelinePlayerProps {
   subtitles: SubtitleItem[];
@@ -32,6 +40,9 @@ interface TimelinePlayerProps {
   onChangeBackgroundVolume: (vol: number) => void;
   duckingAmount: number;
   onChangeDuckingAmount: (val: number) => void;
+  onMixRendered?: (res: { wavBlob: Blob; audioBuffer: AudioBuffer; totalDuration: number }) => void;
+  sharedWavBlob?: Blob | null;
+  sharedAudioBuffer?: AudioBuffer | null;
 }
 
 export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
@@ -46,25 +57,45 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
   onChangeBackgroundVolume,
   duckingAmount,
   onChangeDuckingAmount,
+  onMixRendered,
+  sharedWavBlob,
+  sharedAudioBuffer,
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
 
-  // Audio nodes references for live playback
+  // Rendered Output Audio State
+  const [renderedMixBuffer, setRenderedMixBuffer] = useState<AudioBuffer | null>(
+    sharedAudioBuffer || null
+  );
+  const [renderedWavBlob, setRenderedWavBlob] = useState<Blob | null>(
+    sharedWavBlob || null
+  );
+  const [isRenderingMix, setIsRenderingMix] = useState(false);
+  const [renderProgressMsg, setRenderProgressMsg] = useState('');
+  const [renderError, setRenderError] = useState<string | null>(null);
+
+  // Audio nodes references
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const bgSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
-  const bgGainNodeRef = useRef<GainNode | null>(null);
-  const activeVoiceNodesRef = useRef<{ source: AudioBufferSourceNode; gain: GainNode }[]>([]);
-  const startPlaybackEpochRef = useRef<number>(0);
-  const playbackOffsetRef = useRef<number>(0);
+  const masterSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const masterGainRef = useRef<GainNode | null>(null);
+  const startEpochRef = useRef<number>(0);
+  const currentTimeRef = useRef<number>(0);
+  const isPlayingRef = useRef<boolean>(false);
   const animFrameIdRef = useRef<number | null>(null);
-  const speechBuffersCacheRef = useRef<Map<number, AudioBuffer>>(new Map());
-  const spokenLineIdsRef = useRef<Set<number>>(new Set());
+
+  // Keep ref synchronized
+  currentTimeRef.current = currentTime;
+  isPlayingRef.current = isPlaying;
+
+  const readyVoicesCount = subtitles.filter((s) => Boolean(s.audioBase64)).length;
 
   // Determine total project duration
   let maxDuration = 10;
-  if (originalAudioBuffer) {
+  if (renderedMixBuffer) {
+    maxDuration = Math.max(maxDuration, renderedMixBuffer.duration);
+  } else if (originalAudioBuffer) {
     maxDuration = Math.max(maxDuration, originalAudioBuffer.duration);
   }
   for (const s of subtitles) {
@@ -72,228 +103,195 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
       maxDuration = s.end;
     }
   }
-  maxDuration = Math.ceil(maxDuration + 1.0);
+  maxDuration = Math.ceil(maxDuration + 0.5);
 
-  // Pre-cache speech buffers
-  useEffect(() => {
-    let cancelled = false;
-    const cacheBuffers = async () => {
-      for (const sub of subtitles) {
-        if (sub.audioBase64 && !speechBuffersCacheRef.current.has(sub.id)) {
-          try {
-            const buf = await decodeBase64ToAudioBuffer(sub.audioBase64);
-            if (!cancelled) {
-              speechBuffersCacheRef.current.set(sub.id, buf);
-            }
-          } catch (_) {}
-        }
-      }
-    };
-    cacheBuffers();
-    return () => {
-      cancelled = true;
-    };
-  }, [subtitles]);
-
-  // Clean stop audio playback
-  const stopLiveAudio = () => {
-    stopBrowserSpeech();
-    spokenLineIdsRef.current.clear();
-
-    if (bgSourceNodeRef.current) {
+  // Stop playback cleanly
+  const stopPlayback = () => {
+    if (masterSourceRef.current) {
       try {
-        bgSourceNodeRef.current.stop();
-        bgSourceNodeRef.current.disconnect();
+        masterSourceRef.current.stop();
+        masterSourceRef.current.disconnect();
       } catch (_) {}
-      bgSourceNodeRef.current = null;
+      masterSourceRef.current = null;
     }
-
-    for (const v of activeVoiceNodesRef.current) {
+    if (masterGainRef.current) {
       try {
-        v.source.stop();
-        v.source.disconnect();
+        masterGainRef.current.disconnect();
       } catch (_) {}
+      masterGainRef.current = null;
     }
-    activeVoiceNodesRef.current = [];
-
     if (animFrameIdRef.current) {
       cancelAnimationFrame(animFrameIdRef.current);
       animFrameIdRef.current = null;
     }
-
     setIsPlaying(false);
+    isPlayingRef.current = false;
   };
 
-  // Start live playback from a specific offset in seconds
-  const startLiveAudio = async (offsetSec: number) => {
-    stopLiveAudio();
-    stopBrowserSpeech();
-    spokenLineIdsRef.current.clear();
+  // Start playback of the EXACT rendered output mix buffer
+  const startPlayback = (offsetSec: number) => {
+    stopPlayback();
+
+    const bufferToPlay = renderedMixBuffer || originalAudioBuffer;
+    if (!bufferToPlay) return;
 
     const ctx = getAudioContext();
     audioCtxRef.current = ctx;
 
-    const clampedOffset = Math.max(0, Math.min(maxDuration - 0.1, offsetSec));
-    playbackOffsetRef.current = clampedOffset;
-    startPlaybackEpochRef.current = ctx.currentTime - clampedOffset;
+    const dur = bufferToPlay.duration;
+    const clampedOffset = Math.max(0, Math.min(dur - 0.05, offsetSec));
 
-    // 1. Play Background Original Audio if present and not 'isolated'
-    if (originalAudioBuffer && mixMode !== 'isolated' && clampedOffset < originalAudioBuffer.duration) {
-      const bgSource = ctx.createBufferSource();
-      bgSource.buffer = originalAudioBuffer;
+    const source = ctx.createBufferSource();
+    source.buffer = bufferToPlay;
 
-      const bgGain = ctx.createGain();
-      bgGainNodeRef.current = bgGain;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(isMuted ? 0 : 1.0, ctx.currentTime);
+    source.connect(gain);
+    gain.connect(ctx.destination);
 
-      // Apply initial volume
-      const normalVol = isMuted ? 0 : 1.0;
-      const duckedVol = isMuted
-        ? 0
-        : Math.max(0.05, 1.0 - duckingAmount * (1.0 - backgroundVolume));
+    masterSourceRef.current = source;
+    masterGainRef.current = gain;
 
-      if (mixMode === 'ducking') {
-        bgGain.gain.setValueAtTime(normalVol, ctx.currentTime);
-
-        // Schedule ducking dips for each voice line with sequential collision avoidance
-        let prevDuckingEnd = 0;
-        for (let i = 0; i < subtitles.length; i++) {
-          const sub = subtitles[i];
-          if (sub.audioBase64) {
-            const cachedBuf = speechBuffersCacheRef.current.get(sub.id);
-            const lineStart = Math.max(sub.start, prevDuckingEnd > 0 ? prevDuckingEnd + 0.2 : sub.start);
-            const lineDur = cachedBuf ? cachedBuf.duration : sub.end - sub.start;
-            const lineEnd = lineStart + lineDur;
-            prevDuckingEnd = lineEnd;
-
-            if (lineEnd > clampedOffset) {
-              const duckStartTime = ctx.currentTime + Math.max(0, lineStart - clampedOffset - 0.15);
-              const duckFullTime = ctx.currentTime + Math.max(0, lineStart - clampedOffset);
-              const duckEndTime = ctx.currentTime + Math.max(0, lineEnd - clampedOffset);
-              const restoreTime = duckEndTime + 0.15;
-
-              bgGain.gain.setValueAtTime(normalVol, duckStartTime);
-              bgGain.gain.linearRampToValueAtTime(duckedVol, duckFullTime);
-              bgGain.gain.setValueAtTime(duckedVol, duckEndTime);
-              bgGain.gain.linearRampToValueAtTime(normalVol, restoreTime);
-            }
-          }
-        }
-      } else {
-        bgGain.gain.setValueAtTime(isMuted ? 0 : backgroundVolume, ctx.currentTime);
-      }
-
-      bgSource.connect(bgGain);
-      bgGain.connect(ctx.destination);
-      bgSource.start(0, clampedOffset);
-      bgSourceNodeRef.current = bgSource;
-    }
-
-    // 2. Schedule all Persian voice lines with guaranteed sequential collision avoidance and 1.0x natural pitch
-    let previousVoiceEndTime = 0;
-    for (let i = 0; i < subtitles.length; i++) {
-      const sub = subtitles[i];
-      if (sub.audioBase64) {
-        const cachedBuf = speechBuffersCacheRef.current.get(sub.id);
-        if (!cachedBuf) continue;
-
-        // Guaranteed collision avoidance:
-        // A voice line NEVER starts until the previous line has completely finished + a 0.2s natural pause!
-        const lineStart = Math.max(sub.start, previousVoiceEndTime > 0 ? previousVoiceEndTime + 0.2 : sub.start);
-        const originalDuration = cachedBuf.duration;
-        const lineEnd = lineStart + originalDuration;
-        previousVoiceEndTime = lineEnd;
-
-        if (lineEnd > clampedOffset) {
-          const voiceSource = ctx.createBufferSource();
-          voiceSource.buffer = cachedBuf;
-          // Steady 1.0x playback rate: guarantees 100% natural vocal pitch without pitch-shifting
-          voiceSource.playbackRate.setValueAtTime(1.0, 0);
-
-          const voiceGain = ctx.createGain();
-          voiceGain.gain.setValueAtTime(isMuted ? 0 : persianVolume, ctx.currentTime);
-
-          voiceSource.connect(voiceGain);
-          voiceGain.connect(ctx.destination);
-
-          if (lineStart >= clampedOffset) {
-            const delay = lineStart - clampedOffset;
-            voiceSource.start(ctx.currentTime + delay, 0);
-          } else {
-            const innerOffset = clampedOffset - lineStart;
-            voiceSource.start(ctx.currentTime, innerOffset);
-          }
-
-          activeVoiceNodesRef.current.push({ source: voiceSource, gain: voiceGain });
-        }
-      }
-    }
-
+    source.start(0, clampedOffset);
+    startEpochRef.current = ctx.currentTime - clampedOffset;
     setIsPlaying(true);
+    isPlayingRef.current = true;
 
-    // Animation loop for tracking time & speaking dialogue
+    source.onended = () => {
+      if (audioCtxRef.current && masterSourceRef.current === source) {
+        const elapsed = audioCtxRef.current.currentTime - startEpochRef.current;
+        if (elapsed >= dur - 0.25) {
+          stopPlayback();
+          setCurrentTime(0);
+        }
+      }
+    };
+
     const tick = () => {
-      if (!audioCtxRef.current) return;
-      const elapsed = audioCtxRef.current.currentTime - startPlaybackEpochRef.current;
-      if (elapsed >= maxDuration) {
-        stopLiveAudio();
+      if (!audioCtxRef.current || !masterSourceRef.current) return;
+      const elapsed = audioCtxRef.current.currentTime - startEpochRef.current;
+      if (elapsed >= dur) {
+        stopPlayback();
         setCurrentTime(0);
         return;
       }
       setCurrentTime(elapsed);
-
-      // Check if any dialogue line should be spoken
-      if (!isMuted) {
-        for (let i = 0; i < subtitles.length; i++) {
-          const sub = subtitles[i];
-
-          if (sub.farsiText && !spokenLineIdsRef.current.has(sub.id)) {
-            // Trigger when timeline reaches or passes sub.start
-            if (elapsed >= sub.start) {
-              // Guaranteed non-overlapping & no incomplete cutoffs:
-              // If the browser is STILL speaking the previous sentence, wait! Do NOT interrupt!
-              const isStillSpeaking =
-                typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis.speaking;
-
-              if (isStillSpeaking) {
-                // Defer starting this line until the previous sentence has fully completed every word
-                continue;
-              }
-
-              spokenLineIdsRef.current.add(sub.id);
-              const gender = sub.voice === 'Kore' ? 'female' : (sub.voice === 'Fenrir' || sub.voice === 'Iapetus') ? 'deep' : 'male';
-              speakTextWithBrowser(sub.farsiText, gender);
-            }
-          }
-        }
-      }
-
       animFrameIdRef.current = requestAnimationFrame(tick);
     };
     animFrameIdRef.current = requestAnimationFrame(tick);
   };
 
+  // Fingerprint of all inputs that determine the final rendered audio file
+  const mixFingerprint = useMemo(() => {
+    const subsHash = subtitles
+      .map(
+        (s) =>
+          `${s.id}_${s.start.toFixed(2)}_${s.end.toFixed(2)}_${
+            s.audioBase64
+              ? `${s.audioBase64.length}_${s.audioBase64.slice(0, 16)}_${s.audioBase64.slice(-16)}`
+              : 'none'
+          }`
+      )
+      .join('|');
+    const bgHash = originalAudioBuffer
+      ? `${originalAudioBuffer.duration.toFixed(2)}_${originalAudioBuffer.sampleRate}_${originalAudioBuffer.numberOfChannels}`
+      : 'no-bg';
+    return `${subsHash}##${bgHash}##${mixMode}##${persianVolume}##${backgroundVolume}##${duckingAmount}`;
+  }, [
+    subtitles,
+    originalAudioBuffer,
+    mixMode,
+    persianVolume,
+    backgroundVolume,
+    duckingAmount,
+  ]);
+
+  // Master Render Engine: automatically builds the exact output audio file whenever any voice or setting changes!
+  useEffect(() => {
+    let isCancelled = false;
+
+    // Small debounce to avoid redundant renders while dragging sliders
+    const timer = setTimeout(async () => {
+      const hasVoices = subtitles.some((s) => Boolean(s.audioBase64));
+      if (!hasVoices && !originalAudioBuffer) {
+        setRenderedMixBuffer(null);
+        setRenderedWavBlob(null);
+        setIsRenderingMix(false);
+        return;
+      }
+
+      setIsRenderingMix(true);
+      setRenderError(null);
+      setRenderProgressMsg('در حال میکس و تولید فایل خروجی همگام...');
+
+      try {
+        const result = await renderDubbedTrack(
+          {
+            originalBuffer: originalAudioBuffer,
+            subtitles,
+            mixMode,
+            persianVolume,
+            backgroundVolume,
+            duckingAmount,
+          },
+          (pct, msg) => {
+            if (!isCancelled) {
+              setRenderProgressMsg(msg);
+            }
+          }
+        );
+
+        if (!isCancelled) {
+          setRenderedMixBuffer(result.audioBuffer);
+          setRenderedWavBlob(result.wavBlob);
+          setIsRenderingMix(false);
+          onMixRendered?.(result);
+
+          // If playing during a voice update, smoothly continue playing with the new audio!
+          if (isPlayingRef.current) {
+            startPlayback(currentTimeRef.current);
+          }
+        }
+      } catch (err: any) {
+        if (!isCancelled) {
+          console.error('Master mix auto-render failed:', err);
+          setRenderError(err.message || 'خطا در رندر فایل صوتی خروجی');
+          setIsRenderingMix(false);
+        }
+      }
+    }, 180);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
+  }, [mixFingerprint]);
+
+  // Clean cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopPlayback();
+    };
+  }, []);
+
   const handleTogglePlay = () => {
     if (isPlaying) {
-      stopLiveAudio();
+      stopPlayback();
     } else {
-      startLiveAudio(currentTime);
+      startPlayback(currentTime);
     }
   };
 
   const handleSeek = (newTime: number) => {
-    stopBrowserSpeech();
-    spokenLineIdsRef.current.clear();
     const clamped = Math.max(0, Math.min(maxDuration, newTime));
     setCurrentTime(clamped);
     if (isPlaying) {
-      startLiveAudio(clamped);
+      startPlayback(clamped);
     }
   };
 
   const handleReset = () => {
-    stopBrowserSpeech();
-    spokenLineIdsRef.current.clear();
-    stopLiveAudio();
+    stopPlayback();
     setCurrentTime(0);
   };
 
@@ -301,84 +299,191 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     handleSeek(currentTime + seconds);
   };
 
+  const handleToggleMute = () => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+    if (masterGainRef.current && audioCtxRef.current) {
+      masterGainRef.current.gain.setValueAtTime(
+        nextMuted ? 0 : 1.0,
+        audioCtxRef.current.currentTime
+      );
+    }
+  };
+
+  // Direct download of the current rendered mix right from Stage 4
+  const handleDownloadCurrentMix = () => {
+    if (!renderedWavBlob) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(renderedWavBlob);
+    const modeTag =
+      mixMode === 'ducking'
+        ? 'Ducked-Mix'
+        : mixMode === 'isolated'
+        ? 'Persian-Only'
+        : 'Full-Mix';
+    a.download = `Persian-Dub-Output-${modeTag}-${Date.now()}.wav`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   // Find currently active subtitle line for cinema preview
   const currentActiveSub = subtitles.find(
     (s) => currentTime >= s.start && currentTime <= s.end + 0.3
   );
+
+  // Generate real audio waveform bars from the rendered output audio
+  const waveformPeaks = useMemo(() => {
+    const buf = renderedMixBuffer || originalAudioBuffer;
+    if (!buf) return [];
+    try {
+      const channelData = buf.getChannelData(0);
+      const numBars = 75;
+      const step = Math.floor(channelData.length / numBars);
+      const peaks: number[] = [];
+      for (let i = 0; i < numBars; i++) {
+        let max = 0;
+        const start = i * step;
+        const end = Math.min(channelData.length, start + step);
+        for (let j = start; j < end; j += 8) {
+          const val = Math.abs(channelData[j]);
+          if (val > max) max = val;
+        }
+        peaks.push(Math.min(100, Math.max(14, Math.round(max * 100))));
+      }
+      return peaks;
+    } catch (_) {
+      return [];
+    }
+  }, [renderedMixBuffer, originalAudioBuffer]);
 
   return (
     <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl">
       {/* Step Header */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6 pb-6 border-b border-slate-800">
         <div>
-          <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5">
             <span className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center text-sm font-bold border border-amber-500/30">
               ۴
             </span>
-            <span>استودیو میکس، خط زمان (Timeline) و پخش همگام</span>
-          </h2>
+            <h2 className="text-xl font-bold text-white">
+              استودیو میکس، خط زمان (Timeline) و پخش همگام
+            </h2>
+          </div>
           <p className="text-xs sm:text-sm text-slate-400 mt-1">
-            صوت دوبله فارسی را همراه با صدای فیلم با الگوریتم کاهش خودکار نویز/داکینگ بشنوید و زمان‌بندی را بسنجید.
+            فایل در حال پخش در این بخش دقیقاً همان فایل خروجی نهایی استودیو است. با تغییر هر ویس، خروجی به‌صورت آنی بازسازی و پخش می‌شود.
           </p>
         </div>
 
-        {/* Mix Mode Selector */}
-        <div className="flex items-center gap-2 bg-slate-950 p-1.5 rounded-2xl border border-slate-800 text-xs">
+        {/* Mix Output Status Badge & Quick Download */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {isRenderingMix ? (
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-medium animate-pulse">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span>{renderProgressMsg || 'در حال رندر فایل خروجی...'}</span>
+            </div>
+          ) : renderedMixBuffer ? (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+              <span>فایل خروجی نهایی همگام‌شده (WAV 16-bit PCM)</span>
+            </div>
+          ) : null}
+
+          {renderedWavBlob && (
+            <button
+              type="button"
+              onClick={handleDownloadCurrentMix}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 hover:text-amber-200 text-xs font-semibold transition shadow-sm"
+              title="دانلود فایل میکس فعلی به عنوان خروجی WAV"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>دانلود خروجی میکس (WAV)</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Mix Mode Selector */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6 p-2 rounded-2xl bg-slate-950/70 border border-slate-800/80">
+        <div className="flex items-center gap-2 text-xs font-bold text-slate-400 px-2">
+          <Sliders className="w-4 h-4 text-amber-400" />
+          <span>حالت میکس صدای فیلم و دوبله:</span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           <button
             type="button"
-            onClick={() => {
-              onChangeMixMode('ducking');
-              if (isPlaying) startLiveAudio(currentTime);
-            }}
+            onClick={() => onChangeMixMode('ducking')}
             className={`px-3 py-1.5 rounded-xl font-semibold transition flex items-center gap-1.5 ${
               mixMode === 'ducking'
                 ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
-                : 'text-slate-400 hover:text-slate-200'
+                : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200'
             }`}
           >
             <Radio className="w-3.5 h-3.5" />
-            <span>داکینگ هوشمند (کاهش صدای فیلم در حین صحبت)</span>
+            <span>داکینگ هوشمند (کاهش صدای فیلم حین دیالوگ)</span>
           </button>
 
           <button
             type="button"
-            onClick={() => {
-              onChangeMixMode('isolated');
-              if (isPlaying) startLiveAudio(currentTime);
-            }}
+            onClick={() => onChangeMixMode('isolated')}
             className={`px-3 py-1.5 rounded-xl font-semibold transition flex items-center gap-1.5 ${
               mixMode === 'isolated'
                 ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
-                : 'text-slate-400 hover:text-slate-200'
+                : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200'
             }`}
           >
             <Mic2 className="w-3.5 h-3.5" />
-            <span>فقط دوبله فارسی (خالص)</span>
+            <span>فقط دوبله فارسی (خالص بدون فیلم)</span>
           </button>
 
           <button
             type="button"
-            onClick={() => {
-              onChangeMixMode('full_mix');
-              if (isPlaying) startLiveAudio(currentTime);
-            }}
+            onClick={() => onChangeMixMode('full_mix')}
             className={`px-3 py-1.5 rounded-xl font-semibold transition flex items-center gap-1.5 ${
               mixMode === 'full_mix'
                 ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
-                : 'text-slate-400 hover:text-slate-200'
+                : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200'
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>میکس همسطح</span>
+            <span>میکس همسطح (بدون داکینگ)</span>
           </button>
         </div>
       </div>
 
+      {/* Render Error Alert */}
+      {renderError && (
+        <div className="mb-6 p-4 rounded-2xl bg-rose-950/40 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+          <span>{renderError}</span>
+        </div>
+      )}
+
+      {/* No Voices Notice */}
+      {readyVoicesCount === 0 && !originalAudioBuffer && (
+        <div className="mb-6 p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center gap-3">
+          <Sparkles className="w-5 h-5 text-amber-400 shrink-0" />
+          <div>
+            <div className="font-bold text-amber-300 mb-0.5">
+              هنوز ویس دوبله‌ای تولید نشده است
+            </div>
+            <div className="text-slate-400">
+              برای ساخت و شنیدن فایل خروجی دوبله، ابتدا در مرحله ۳ (صداپیشگی) دکمه «تولید صدای دوبلورها» را بزنید.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Cinema Screen Subtitle Overlay Box */}
       <div className="mb-6 relative rounded-2xl bg-gradient-to-b from-slate-950 to-slate-900 border border-slate-800 p-6 flex flex-col items-center justify-center min-h-[140px] text-center overflow-hidden shadow-inner">
         <div className="absolute top-3 right-4 flex items-center gap-2 text-[11px] text-slate-500">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span>پیش‌نمایش زنده زیرنویس و دیالوگ دوبله</span>
+          <span
+            className={`w-2 h-2 rounded-full ${
+              isPlaying ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'
+            }`}
+          />
+          <span>نمایش زنده دیالوگ همگام با صوت خروجی</span>
         </div>
 
         {currentActiveSub ? (
@@ -392,17 +497,22 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
             <div className="mt-2 inline-flex items-center gap-2 px-3 py-0.5 rounded-full bg-slate-800/80 border border-slate-700 text-[11px] text-amber-400/90">
               <span>گوینده: {currentActiveSub.voice}</span>
               {currentActiveSub.emotion && <span>&bull; لحن: {currentActiveSub.emotion}</span>}
+              {currentActiveSub.audioBase64 && (
+                <span className="text-emerald-400 font-mono">&bull; صوت استودیویی آماده</span>
+              )}
             </div>
           </div>
         ) : (
           <div className="text-slate-500 text-xs flex flex-col items-center gap-1">
-            <span>در این ثانیه دیالوگی وجود ندارد (سکوت یا صدای محیط فیلم)</span>
-            <span className="text-[11px] text-slate-600">برای پخش یا پرش به خطوط دیالوگ از نوار پایین استفاده کنید</span>
+            <span>در این ثانیه دیالوگی وجود ندارد (سکوت یا صدای زمینه فیلم)</span>
+            <span className="text-[11px] text-slate-600">
+              برای پخش یا پرش به خطوط دیالوگ از نوار پایین استفاده کنید
+            </span>
           </div>
         )}
       </div>
 
-      {/* Visual Timeline Track */}
+      {/* Visual Timeline Track with Real Rendered Waveform */}
       <div className="mb-6 p-4 bg-slate-950 rounded-2xl border border-slate-800 select-none">
         {/* Time ruler */}
         <div className="flex justify-between text-[11px] font-mono text-slate-500 mb-2 px-1">
@@ -421,7 +531,7 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
             const ratio = clickX / rect.width;
             handleSeek(ratio * maxDuration);
           }}
-          className="relative h-20 bg-slate-900 rounded-xl overflow-hidden cursor-pointer border border-slate-800 hover:border-slate-700 transition"
+          className="relative h-24 bg-slate-900/90 rounded-xl overflow-hidden cursor-pointer border border-slate-800 hover:border-slate-700 transition"
         >
           {/* Subtle grid lines */}
           <div className="absolute inset-0 flex justify-between pointer-events-none opacity-20">
@@ -430,17 +540,15 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
             <div className="border-r border-slate-700 w-1/4 h-full" />
           </div>
 
-          {/* Background Audio Waveform representation */}
-          {originalAudioBuffer && (
-            <div className="absolute inset-x-0 bottom-1 top-8 flex items-center opacity-30 pointer-events-none px-1">
-              <div className="w-full h-full flex items-center justify-around gap-[1px]">
-                {Array.from({ length: 60 }).map((_, i) => (
+          {/* Actual Rendered Audio Waveform */}
+          {waveformPeaks.length > 0 && (
+            <div className="absolute inset-x-0 bottom-1 top-7 flex items-center opacity-35 pointer-events-none px-2">
+              <div className="w-full h-full flex items-center justify-between gap-[1px]">
+                {waveformPeaks.map((peak, i) => (
                   <div
                     key={i}
-                    className="w-1 bg-purple-400 rounded-full"
-                    style={{
-                      height: `${20 + Math.sin(i * 0.3) * 35 + ((i % 5) * 8)}%`,
-                    }}
+                    className="flex-1 bg-gradient-to-t from-amber-500 to-purple-400 rounded-full mx-[0.5px]"
+                    style={{ height: `${peak}%` }}
                   />
                 ))}
               </div>
@@ -457,20 +565,27 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
             return (
               <div
                 key={sub.id}
-                title={`خط ${idx + 1}: ${sub.farsiText || sub.originalText}`}
-                className={`absolute top-2.5 bottom-2.5 rounded-lg px-2 flex flex-col justify-center border transition-all text-[10px] overflow-hidden ${
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleSeek(sub.start);
+                }}
+                title={`خط ${idx + 1}: ${sub.farsiText || sub.originalText} (کلیک برای پرش)`}
+                className={`absolute top-2.5 bottom-2.5 rounded-lg px-2 flex flex-col justify-center border transition-all text-[10px] overflow-hidden cursor-pointer ${
                   isLineActive
                     ? 'bg-amber-500 border-amber-300 text-slate-950 font-bold z-10 scale-[1.03] shadow-lg shadow-amber-500/30'
                     : hasAudio
-                    ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
-                    : 'bg-slate-800/80 border-slate-700 text-slate-400'
+                    ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300 hover:border-emerald-400'
+                    : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:border-slate-600'
                 }`}
                 style={{
                   left: `${leftPct}%`,
                   width: `${widthPct}%`,
                 }}
               >
-                <div className="font-mono text-[9px] truncate">#{idx + 1}</div>
+                <div className="font-mono text-[9px] truncate flex items-center justify-between">
+                  <span>#{idx + 1}</span>
+                  {hasAudio && <span className="text-[8px] font-sans opacity-90">{sub.voice}</span>}
+                </div>
                 <div className="truncate font-sans font-medium">
                   {sub.farsiText || sub.originalText}
                 </div>
@@ -515,7 +630,8 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
           <button
             type="button"
             onClick={handleTogglePlay}
-            className="w-13 h-13 rounded-2xl bg-gradient-to-tr from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold flex items-center justify-center transition shadow-lg shadow-amber-500/25"
+            disabled={!renderedMixBuffer && !originalAudioBuffer}
+            className="w-13 h-13 rounded-2xl bg-gradient-to-tr from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold flex items-center justify-center transition shadow-lg shadow-amber-500/25 disabled:opacity-40"
           >
             {isPlaying ? (
               <Pause className="w-6 h-6 fill-current" />
@@ -531,6 +647,19 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
             className="p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition"
           >
             <FastForward className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
+            onClick={handleToggleMute}
+            title={isMuted ? 'صدادار' : 'بی‌صدا'}
+            className={`p-2.5 rounded-xl border transition ${
+              isMuted
+                ? 'bg-rose-500/20 border-rose-500/40 text-rose-300'
+                : 'bg-slate-900 hover:bg-slate-800 border-slate-800 text-slate-300'
+            }`}
+          >
+            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
 
           {/* Time Display */}

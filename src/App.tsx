@@ -46,6 +46,9 @@ export default function App() {
   const [persianVolume, setPersianVolume] = useState<number>(1.0);
   const [backgroundVolume, setBackgroundVolume] = useState<number>(0.2);
   const [duckingAmount, setDuckingAmount] = useState<number>(0.8);
+  const [sharedWavBlob, setSharedWavBlob] = useState<Blob | null>(null);
+  const [sharedAudioBuffer, setSharedAudioBuffer] = useState<AudioBuffer | null>(null);
+  const [sharedDuration, setSharedDuration] = useState<number>(0);
 
   // 5. Active Step / Tab
   const [activeStep, setActiveStep] = useState<number>(1);
@@ -278,6 +281,13 @@ export default function App() {
               onChangeBackgroundVolume={setBackgroundVolume}
               duckingAmount={duckingAmount}
               onChangeDuckingAmount={setDuckingAmount}
+              sharedWavBlob={sharedWavBlob}
+              sharedAudioBuffer={sharedAudioBuffer}
+              onMixRendered={(res) => {
+                setSharedWavBlob(res.wavBlob);
+                setSharedAudioBuffer(res.audioBuffer);
+                setSharedDuration(res.totalDuration);
+              }}
             />
           </div>
 
@@ -291,6 +301,13 @@ export default function App() {
               persianVolume={persianVolume}
               backgroundVolume={backgroundVolume}
               duckingAmount={duckingAmount}
+              sharedWavBlob={sharedWavBlob}
+              sharedDuration={sharedDuration}
+              onMixRendered={(res) => {
+                setSharedWavBlob(res.wavBlob);
+                setSharedAudioBuffer(res.audioBuffer);
+                setSharedDuration(res.totalDuration);
+              }}
             />
           </div>
         </div>

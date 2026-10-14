@@ -156,14 +156,12 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
           status: 'translated',
         });
       } else {
-        // Simple fallback
-        onUpdateSubtitle(sub.id, {
-          farsiText: sub.originalText ? `دیالوگ محاوره‌ای خط ${sub.id}` : sub.farsiText,
-          status: 'translated',
-        });
+        const err = data?.error || 'خطا در ترجمه این خط با هوش مصنوعی.';
+        setTranslationError(err);
       }
     } catch (err: any) {
       console.warn('Single line translation error:', err);
+      setTranslationError(err?.message || 'خطا در ترجمه خط.');
     } finally {
       setTranslatingLineId(null);
     }
@@ -294,16 +292,25 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
             <span>{translationError}</span>
           </div>
           <p className="text-slate-300 leading-relaxed mb-3">
-            اگر سهمیه روزانه یا دقیقه‌ای پلن رایگان به اتمام رسیده است، می‌توانید با کلیک روی دکمه زیر یک کلید جدید وارد کنید:
+            اگر خطای ۵۰۳ ناشی از ترافیک موقت سرورهای گوگل است، با کلیک مجدد روی دکمه زیر ترجمه بلافاصله با مدل‌های جایگزین Flash و Flash-Lite انجام می‌شود:
           </p>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleTranslateAll}
+              disabled={isTranslating}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition text-xs shadow"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isTranslating ? 'animate-spin' : ''}`} />
+              <span>تلاش مجدد ترجمه دیالوگ‌ها با جمینای</span>
+            </button>
             {onOpenApiKeyModal && (
               <button
                 type="button"
                 onClick={onOpenApiKeyModal}
-                className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition text-xs"
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition text-xs border border-slate-700"
               >
-                تنظیم کلید جدید API
+                بررسی یا تغییر کلید API
               </button>
             )}
           </div>

@@ -716,7 +716,7 @@ app.post('/api/translate-subtitles', async (req: Request, res: Response) => {
       text: (l.text || '').trim(),
     }));
 
-    const promptText = `شما یک مدیر دوبلاژ و مترجم ارشد فیلم، سریال و ویدیوهای آموزشی تخصصی به زبان فارسی هستید.
+    const buildPromptForLines = (subsetLines: Array<{ id: number; text: string }>) => `شما یک مدیر دوبلاژ و مترجم ارشد فیلم، سریال و ویدیوهای آموزشی تخصصی به زبان فارسی هستید.
 وظیفه شما ترجمه کاملاً واضح، رسا، دقیق، خوش‌آهنگ، قابل فهم و غنی خطوط زیرنویس انگلیسی زیر به زبان فارسی محاوره‌ای برای دوبله است.
 
 قوانین حیاتی ترجمه:
@@ -755,7 +755,7 @@ app.post('/api/translate-subtitles', async (req: Request, res: Response) => {
 ${context ? `زمینه فیلم یا ویدیو: ${context}` : ''}
 
 خطوط برای ترجمه:
-${JSON.stringify(simpleLines, null, 2)}
+${JSON.stringify(subsetLines, null, 2)}
 `;
 
     const translationSchema = {
@@ -769,7 +769,7 @@ ${JSON.stringify(simpleLines, null, 2)}
               id: { type: Type.INTEGER, description: 'شناسه خط زیرنویس' },
               farsiText: { type: Type.STRING, description: 'ترجمه فارسی روان، واضح، کامل، رسا و خوش‌آهنگ' },
               characterEmotion: { type: Type.STRING, description: 'لحن و احساس پیشنهادی گوینده' },
-              suggestedGender: { type: Type.STRING, description: 'جنسیت احتمالی گوینده (male یا female)' }
+              suggestedGender: { type: Type.STRING, description: 'جنسیت احتمالی گوینده (male یا female)' },
             },
             required: ['id', 'farsiText'],
           },
@@ -778,83 +778,88 @@ ${JSON.stringify(simpleLines, null, 2)}
       required: ['translations'],
     };
 
-    // Blazing-fast execution: prioritize gemini-3.8-flash for instant, high-quality translation
-    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
-    let lastError: any;
-    let translationResponse: any;
+    // Candidate models with multi-tier fallback: gemini-3.8-flash -> gemini-3.1-flash-lite -> gemini-flash-latest
+    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
 
-    for (const modelName of candidateModels) {
-      try {
-        console.log(`[Fast Translate] Requesting ${modelName}...`);
-        translationResponse = await ai.models.generateContent({
-          model: modelName,
-          contents: promptText,
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: translationSchema,
-            temperature: 0.3,
-          },
-        });
-        // If succeeded, break out of model fallback loop immediately
-        break;
-      } catch (modelErr: any) {
-        lastError = modelErr;
-        console.log(`[Model Info] Translation on ${modelName} deferred. Trying fallback model...`, modelErr?.message);
-        continue;
+    // Chunk large batches into sets of 20 to avoid payload timeouts and 503 capacity spikes
+    const CHUNK_SIZE = 20;
+    const allTranslations: Array<{ id: number; farsiText: string; characterEmotion?: string; suggestedGender?: string }> = [];
+
+    for (let i = 0; i < simpleLines.length; i += CHUNK_SIZE) {
+      const chunk = simpleLines.slice(i, i + CHUNK_SIZE);
+      const promptText = buildPromptForLines(chunk);
+
+      let chunkResponse: any = null;
+      let chunkError: any = null;
+
+      for (const modelName of candidateModels) {
+        try {
+          console.log(`[Fast Translate] Requesting ${modelName} for lines ${chunk[0].id}..${chunk[chunk.length - 1].id}...`);
+          chunkResponse = await callWithRetry(
+            () =>
+              ai.models.generateContent({
+                model: modelName,
+                contents: promptText,
+                config: {
+                  responseMimeType: 'application/json',
+                  responseSchema: translationSchema,
+                  temperature: 0.3,
+                },
+              }),
+            2, // Retries on 503 high demand
+            1500 // 1.5s base delay
+          );
+
+          if (chunkResponse?.text) {
+            const parsed = JSON.parse(chunkResponse.text || '{"translations": []}');
+            if (Array.isArray(parsed.translations) && parsed.translations.length > 0) {
+              allTranslations.push(...parsed.translations);
+              chunkResponse = true;
+              break;
+            }
+          }
+        } catch (modelErr: any) {
+          chunkError = modelErr;
+          console.warn(`[Model Info] Translation on ${modelName} deferred. Trying next model...`, modelErr?.message || modelErr);
+          if (isAuthenticationError(modelErr)) {
+            throw modelErr;
+          }
+          continue;
+        }
+      }
+
+      if (!chunkResponse) {
+        throw chunkError || new Error('خطا در ترجمه خطوط با تمام مدل‌های هوش مصنوعی.');
       }
     }
 
-    if (!translationResponse) {
-      console.log('[Translation Fallback] Generating natural dubbing script due to external model status.');
-      const fallbackList = lines.map((l: any, idx: number) => {
-        const farsiText = generateColloquialTranslation(l.text || '');
-        return {
-          id: l.id,
-          farsiText,
-          characterEmotion: 'طبیعی',
-          suggestedGender: idx % 2 === 0 ? 'female' : 'male',
-        };
-      });
-
-      return res.json({
-        success: true,
-        translations: fallbackList,
-        fromFallback: true,
-        notice: 'متن پیشنهادی دوبله محاوره‌ای با حفظ اصطلاحات فنی بارگذاری شد.',
-      });
-    }
-
-    const parsed = JSON.parse(translationResponse.text || '{"translations": []}');
-    res.json({
-      success: true,
-      translations: parsed.translations || [],
-    });
-  } catch (error: any) {
-    console.error('Translation error encountered, providing intelligent fallback:', error?.message);
-    const fallbackList = (req.body.lines || []).map((l: any, idx: number) => {
-      const farsiText = generateColloquialTranslation(l.text || '');
-      return {
-        id: l.id,
-        farsiText,
-        characterEmotion: 'طبیعی',
-        suggestedGender: idx % 2 === 0 ? 'female' : 'male',
-      };
-    });
-
-    const isAuth = isAuthenticationError(error);
-    const { isRateLimited, isDailyLimit } = extractRateLimitInfo(error);
-
     return res.json({
       success: true,
-      translations: fallbackList,
-      fromFallback: true,
+      translations: allTranslations,
+    });
+  } catch (error: any) {
+    console.error('Translation error encountered:', error?.message);
+    const isAuth = isAuthenticationError(error);
+    const isHighDemand = isHighDemandError(error);
+    const { isRateLimited, isDailyLimit, retryAfterSeconds } = extractRateLimitInfo(error);
+
+    const errorMessage = isAuth
+      ? 'کلید API وارد شده نامعتبر است یا هنوز تنظیم نشده است. لطفاً کلید معتبر خود را وارد نمایید.'
+      : isHighDemand
+      ? 'سرورهای هوش مصنوعی گوگل (Gemini 503) در این لحظه ترافیک سنگین دارند. این وضعیت موقتی است؛ لطفاً چند ثانیه دیگر دکمه تلاش مجدد را بزنید.'
+      : isDailyLimit
+      ? 'سهمیه روزانه کلید API شما به اتمام رسیده است. لطفاً از کلید دیگری استفاده نمایید.'
+      : isRateLimited
+      ? `محدودیت تعداد درخواست در دقیقه (Rate Limit). لطفاً ${retryAfterSeconds} ثانیه دیگر مجدداً امتحان کنید.`
+      : error?.message || 'خطا در ارتباط با سرویس ترجمه هوش مصنوعی.';
+
+    return res.status(isAuth ? 401 : isHighDemand ? 503 : isRateLimited ? 429 : 500).json({
+      success: false,
+      error: errorMessage,
       isAuthError: isAuth,
+      isHighDemand,
       isRateLimited,
-      notice: isAuth
-        ? 'کلید API هنوز تنظیم نشده یا منقضی است؛ دیالوگ‌های محاوره‌ای دوبله بارگذاری شدند.'
-        : isDailyLimit
-        ? 'سهمیه روزانه جمینای تکمیل بود؛ دیالوگ‌های محاوره‌ای دوبله بارگذاری شدند.'
-        : 'متن ترجمه محاوره‌ای آماده استفاده است.',
+      retryAfterSeconds,
     });
   }
 });

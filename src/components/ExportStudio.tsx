@@ -24,6 +24,9 @@ interface ExportStudioProps {
   persianVolume: number;
   backgroundVolume: number;
   duckingAmount: number;
+  sharedWavBlob?: Blob | null;
+  sharedDuration?: number;
+  onMixRendered?: (res: { wavBlob: Blob; audioBuffer: AudioBuffer; totalDuration: number }) => void;
 }
 
 export const ExportStudio: React.FC<ExportStudioProps> = ({
@@ -34,15 +37,32 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({
   persianVolume,
   backgroundVolume,
   duckingAmount,
+  sharedWavBlob,
+  sharedDuration,
+  onMixRendered,
 }) => {
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState<{ percent: number; message: string }>({
     percent: 0,
     message: '',
   });
-  const [renderedWavBlob, setRenderedWavBlob] = useState<Blob | null>(null);
-  const [renderedWavUrl, setRenderedWavUrl] = useState<string | null>(null);
-  const [renderedDuration, setRenderedDuration] = useState<number>(0);
+  const [renderedWavBlob, setRenderedWavBlob] = useState<Blob | null>(sharedWavBlob || null);
+  const [renderedWavUrl, setRenderedWavUrl] = useState<string | null>(
+    sharedWavBlob ? URL.createObjectURL(sharedWavBlob) : null
+  );
+  const [renderedDuration, setRenderedDuration] = useState<number>(sharedDuration || 0);
+
+  // Sync with shared render from TimelinePlayer
+  React.useEffect(() => {
+    if (sharedWavBlob) {
+      setRenderedWavBlob(sharedWavBlob);
+      const url = URL.createObjectURL(sharedWavBlob);
+      setRenderedWavUrl(url);
+      if (sharedDuration) {
+        setRenderedDuration(sharedDuration);
+      }
+    }
+  }, [sharedWavBlob, sharedDuration]);
 
   const readyVoicesCount = subtitles.filter((s) => s.audioBase64).length;
   const canRender = readyVoicesCount > 0;
@@ -72,6 +92,7 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({
       setRenderedWavBlob(result.wavBlob);
       setRenderedWavUrl(blobUrl);
       setRenderedDuration(result.totalDuration);
+      onMixRendered?.(result);
     } catch (err: any) {
       alert('خطا در رندر فایل صوتی: ' + (err.message || 'خطای نامشخص'));
     } finally {

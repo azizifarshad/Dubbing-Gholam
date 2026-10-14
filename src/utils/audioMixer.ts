@@ -12,12 +12,19 @@ export function getAudioContext(): AudioContext {
   return sharedAudioCtx;
 }
 
+// In-memory cache for decoded audio buffers keyed by base64 signature
+const base64BufferCache = new Map<string, AudioBuffer>();
+
+export function clearAudioBufferCache() {
+  base64BufferCache.clear();
+}
+
 /**
  * Converts a base64 encoded audio string into an ArrayBuffer
  */
 export function base64ToArrayBuffer(base64: string): ArrayBuffer {
   // Strip data URL scheme if present
-  const cleanBase64 = base64.replace(/^data:audio\/\w+;base64,/, '');
+  const cleanBase64 = base64.replace(/^data:audio\/\w+;base64,/, '').trim();
   const binaryString = atob(cleanBase64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {
@@ -27,12 +34,21 @@ export function base64ToArrayBuffer(base64: string): ArrayBuffer {
 }
 
 /**
- * Decodes a base64 WAV string into an AudioBuffer
+ * Decodes a base64 WAV string into an AudioBuffer with signature-based caching
  */
 export async function decodeBase64ToAudioBuffer(base64: string): Promise<AudioBuffer> {
+  const cleanBase64 = base64.replace(/^data:audio\/\w+;base64,/, '').trim();
+  const cacheKey = `${cleanBase64.length}_${cleanBase64.slice(0, 32)}_${cleanBase64.slice(-32)}`;
+  const cached = base64BufferCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const ctx = getAudioContext();
-  const arrayBuffer = base64ToArrayBuffer(base64);
-  return await ctx.decodeAudioData(arrayBuffer);
+  const arrayBuffer = base64ToArrayBuffer(cleanBase64);
+  const buffer = await ctx.decodeAudioData(arrayBuffer);
+  base64BufferCache.set(cacheKey, buffer);
+  return buffer;
 }
 
 /**
@@ -191,6 +207,7 @@ export async function renderDubbedTrack(
       // Crossfade time in seconds
       const fadeTime = 0.15;
       let prevDuckingEnd = 0;
+      let lastEventTime = 0;
 
       for (let i = 0; i < speechTracks.length; i++) {
         const st = speechTracks[i];
@@ -198,14 +215,21 @@ export async function renderDubbedTrack(
         const end = Math.min(maxDuration, start + st.buffer.duration + 0.1);
         prevDuckingEnd = end;
 
-        // Fade down slightly before line starts
-        const duckStart = Math.max(0, start - fadeTime);
-        bgGain.gain.setValueAtTime(normalVol, duckStart);
-        bgGain.gain.linearRampToValueAtTime(duckedVol, start);
+        // Ensure strictly increasing event times to avoid Web Audio DOMException
+        const duckStart = Math.max(lastEventTime + 0.005, start - fadeTime);
+        const duckFull = Math.max(duckStart + 0.005, start);
+        const duckEnd = Math.max(duckFull + 0.005, end);
+        const restoreEnd = Math.min(maxDuration, Math.max(duckEnd + 0.005, end + fadeTime));
 
-        // Hold ducked volume until end, then fade back up
-        bgGain.gain.setValueAtTime(duckedVol, end);
-        bgGain.gain.linearRampToValueAtTime(normalVol, Math.min(maxDuration, end + fadeTime));
+        try {
+          if (duckStart > lastEventTime) {
+            bgGain.gain.setValueAtTime(normalVol, duckStart);
+          }
+          bgGain.gain.linearRampToValueAtTime(duckedVol, duckFull);
+          bgGain.gain.setValueAtTime(duckedVol, duckEnd);
+          bgGain.gain.linearRampToValueAtTime(normalVol, restoreEnd);
+          lastEventTime = restoreEnd;
+        } catch (_) {}
       }
     } else {
       // Full mix without ducking
