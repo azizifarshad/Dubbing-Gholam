@@ -123,6 +123,69 @@ export function audioBufferToWav(buffer: AudioBuffer): Blob {
   return new Blob([wavBuffer], { type: 'audio/wav' });
 }
 
+/**
+ * Automatically detects and trims dead digital silence at the start and end of a speech buffer
+ * so that vocal articulation attacks at the exact intended millisecond.
+ */
+export function trimBufferSilence(
+  buffer: AudioBuffer,
+  ctx: BaseAudioContext,
+  thresholdDb: number = -42
+): AudioBuffer {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const length = buffer.length;
+  const thresholdLinear = Math.pow(10, thresholdDb / 20); // ~0.0079
+
+  // Find start sample (search up to first 800ms)
+  let startSample = 0;
+  const maxSearchStart = Math.min(length, Math.floor(sampleRate * 0.8));
+
+  for (let i = 0; i < maxSearchStart; i++) {
+    let peak = 0;
+    for (let c = 0; c < numChannels; c++) {
+      const val = Math.abs(buffer.getChannelData(c)[i]);
+      if (val > peak) peak = val;
+    }
+    if (peak > thresholdLinear) {
+      // Leave a tiny 20ms pre-cushion so initial consonant bursts are preserved
+      const cushion = Math.floor(sampleRate * 0.02);
+      startSample = Math.max(0, i - cushion);
+      break;
+    }
+  }
+
+  // Find end sample (search backwards from end)
+  let endSample = length;
+  const minSearchEnd = Math.max(startSample + Math.floor(sampleRate * 0.3), length - Math.floor(sampleRate * 1.5));
+  for (let i = length - 1; i >= minSearchEnd; i--) {
+    let peak = 0;
+    for (let c = 0; c < numChannels; c++) {
+      const val = Math.abs(buffer.getChannelData(c)[i]);
+      if (val > peak) peak = val;
+    }
+    if (peak > thresholdLinear) {
+      const cushion = Math.floor(sampleRate * 0.05);
+      endSample = Math.min(length, i + cushion);
+      break;
+    }
+  }
+
+  const trimmedLength = endSample - startSample;
+  if (trimmedLength <= 0 || (startSample === 0 && endSample === length)) {
+    return buffer;
+  }
+
+  const trimmed = ctx.createBuffer(numChannels, trimmedLength, sampleRate);
+  for (let c = 0; c < numChannels; c++) {
+    const src = buffer.getChannelData(c);
+    const dest = trimmed.getChannelData(c);
+    dest.set(src.subarray(startSample, endSample));
+  }
+
+  return trimmed;
+}
+
 export interface MixRenderOptions {
   originalBuffer: AudioBuffer | null;
   subtitles: SubtitleItem[];
@@ -134,7 +197,9 @@ export interface MixRenderOptions {
 }
 
 /**
- * Performs sample-accurate offline rendering of the full Persian dubbed track
+ * Performs sample-accurate offline rendering of the full Persian dubbed track.
+ * Strictly anchors every voice line to its exact subtitle start timestamp (sub.start)
+ * to guarantee 100% zero-drift synchronization with the video audio and Persian subtitles.
  */
 export async function renderDubbedTrack(
   options: MixRenderOptions,
@@ -152,18 +217,53 @@ export async function renderDubbedTrack(
   onProgress?.(10, 'در حال بارگذاری و دیکود صوت‌های دوبله فارسی...');
 
   // Decode all ready subtitle speech audio buffers
-  const speechTracks: { item: SubtitleItem; buffer: AudioBuffer }[] = [];
+  const rawSpeechTracks: { item: SubtitleItem; buffer: AudioBuffer }[] = [];
   for (let i = 0; i < subtitles.length; i++) {
     const sub = subtitles[i];
     if (sub.audioBase64) {
       try {
         const buf = await decodeBase64ToAudioBuffer(sub.audioBase64);
-        speechTracks.push({ item: sub, buffer: buf });
+        rawSpeechTracks.push({ item: sub, buffer: buf });
       } catch (err) {
         console.error(`Failed to decode audio for line #${sub.id}`, err);
       }
     }
   }
+
+  // Sort strictly by subtitle start time
+  rawSpeechTracks.sort((a, b) => a.item.start - b.item.start);
+
+  const sampleRate = originalBuffer ? originalBuffer.sampleRate : 44100;
+  const channels = originalBuffer ? originalBuffer.numberOfChannels : 2;
+
+  // Trim leading/trailing digital silence on all speech buffers so speech attacks instantly at sub.start
+  const speechTracks: {
+    item: SubtitleItem;
+    buffer: AudioBuffer;
+    start: number;
+    effectiveDuration: number;
+    playbackRate: number;
+  }[] = [];
+
+  const tempCtx = new OfflineAudioContext(1, 1024, sampleRate);
+
+  for (let i = 0; i < rawSpeechTracks.length; i++) {
+    const st = rawSpeechTracks[i];
+    const trimmed = trimBufferSilence(st.buffer, tempCtx);
+    const offset = typeof st.item.audioOffset === 'number' ? st.item.audioOffset : 0;
+    const start = Math.max(0, st.item.start + offset);
+
+    speechTracks.push({
+      item: st.item,
+      buffer: trimmed,
+      start,
+      effectiveDuration: trimmed.duration,
+      playbackRate: 1.0, // Strictly 1.0x: Preserves 100% natural vocal tone, pitch, and depth
+    });
+  }
+
+  // Sort speech tracks by their effective shifted start time
+  speechTracks.sort((a, b) => a.start - b.start);
 
   // Determine total duration
   let maxDuration = 10;
@@ -171,7 +271,7 @@ export async function renderDubbedTrack(
     maxDuration = Math.max(maxDuration, originalBuffer.duration);
   }
   for (const st of speechTracks) {
-    const speechEnd = st.item.start + st.buffer.duration;
+    const speechEnd = st.start + st.effectiveDuration;
     if (speechEnd > maxDuration) {
       maxDuration = speechEnd;
     }
@@ -179,10 +279,7 @@ export async function renderDubbedTrack(
   // Add 1 second breathing room at the end
   maxDuration = Math.ceil(maxDuration + 1.0);
 
-  const sampleRate = originalBuffer ? originalBuffer.sampleRate : 44100;
-  const channels = originalBuffer ? originalBuffer.numberOfChannels : 2;
-
-  onProgress?.(30, 'در حال آماده‌سازی موتور میکس و همگام‌سازی زمانی...');
+  onProgress?.(30, 'در حال همگام‌سازی دقیق زمانی صوت دوبله با تصویر و زیرنویس...');
 
   const offlineCtx = new OfflineAudioContext(
     channels,
@@ -198,28 +295,45 @@ export async function renderDubbedTrack(
     const bgGain = offlineCtx.createGain();
 
     if (mixMode === 'ducking') {
-      // Setup dynamic ducking envelope
+      // Setup sample-accurate dynamic ducking envelope anchored directly to speech intervals
       const normalVol = 1.0;
       const duckedVol = Math.max(0.05, 1.0 - duckingAmount * (1.0 - backgroundVolume));
 
       bgGain.gain.setValueAtTime(normalVol, 0);
 
-      // Crossfade time in seconds
-      const fadeTime = 0.15;
-      let prevDuckingEnd = 0;
+      // Merge speech intervals that are within 0.35s of each other to avoid jarring audio pumping
+      interface DuckInterval {
+        start: number;
+        end: number;
+      }
+      const rawIntervals: DuckInterval[] = speechTracks.map((st) => ({
+        start: st.start,
+        end: st.start + st.effectiveDuration,
+      }));
+
+      const mergedIntervals: DuckInterval[] = [];
+      for (const cur of rawIntervals) {
+        if (mergedIntervals.length === 0) {
+          mergedIntervals.push({ ...cur });
+        } else {
+          const prev = mergedIntervals[mergedIntervals.length - 1];
+          if (cur.start <= prev.end + 0.35) {
+            prev.end = Math.max(prev.end, cur.end);
+          } else {
+            mergedIntervals.push({ ...cur });
+          }
+        }
+      }
+
+      // Smooth pre-duck (120ms before line) and post-restore (150ms after line)
+      const fadeTime = 0.12;
       let lastEventTime = 0;
 
-      for (let i = 0; i < speechTracks.length; i++) {
-        const st = speechTracks[i];
-        const start = Math.max(st.item.start, prevDuckingEnd > 0 ? prevDuckingEnd + 0.2 : st.item.start);
-        const end = Math.min(maxDuration, start + st.buffer.duration + 0.1);
-        prevDuckingEnd = end;
-
-        // Ensure strictly increasing event times to avoid Web Audio DOMException
-        const duckStart = Math.max(lastEventTime + 0.005, start - fadeTime);
-        const duckFull = Math.max(duckStart + 0.005, start);
-        const duckEnd = Math.max(duckFull + 0.005, end);
-        const restoreEnd = Math.min(maxDuration, Math.max(duckEnd + 0.005, end + fadeTime));
+      for (const interval of mergedIntervals) {
+        const duckStart = Math.max(lastEventTime + 0.01, interval.start - fadeTime);
+        const duckFull = Math.max(duckStart + 0.01, interval.start);
+        const duckEnd = Math.max(duckFull + 0.01, interval.end);
+        const restoreEnd = Math.min(maxDuration, Math.max(duckEnd + 0.01, interval.end + fadeTime));
 
         try {
           if (duckStart > lastEventTime) {
@@ -241,31 +355,35 @@ export async function renderDubbedTrack(
     bgSource.start(0);
   }
 
-  // 2. Position and play each Persian speech track with sequential collision avoidance and 1.0x pitch
-  onProgress?.(55, 'در حال میکس نهایی ترک‌های صوتی با کیفیت ۱.۰x استودیویی بدون تداخل...');
+  // 2. Position and play each Persian speech track anchored strictly to its subtitle start timestamp
+  onProgress?.(55, 'در حال میکس نهایی ترک‌های صوتی همگام بدون هیچ‌گونه تاخیر انباشته...');
 
-  let previousVoiceEndTime = 0;
   for (let i = 0; i < speechTracks.length; i++) {
     const st = speechTracks[i];
-
-    // Sequential collision avoidance: never overlap with previous track
-    const lineStart = Math.max(st.item.start, previousVoiceEndTime > 0 ? previousVoiceEndTime + 0.2 : st.item.start);
-    const duration = st.buffer.duration;
-    previousVoiceEndTime = lineStart + duration;
+    const nextSt = speechTracks[i + 1];
 
     const voiceSource = offlineCtx.createBufferSource();
     voiceSource.buffer = st.buffer;
-    // Constant 1.0x rate: guarantees natural vocal pitch without pitch-shifting
-    voiceSource.playbackRate.setValueAtTime(1.0, 0);
+    voiceSource.playbackRate.setValueAtTime(st.playbackRate, 0);
 
     const voiceGain = offlineCtx.createGain();
     voiceGain.gain.setValueAtTime(persianVolume, 0);
 
+    // If text was exceptionally long and slightly touches the next line, apply subtle fade-out
+    if (nextSt && st.start + st.effectiveDuration > nextSt.start - 0.03) {
+      const stopTime = Math.max(st.start + 0.3, nextSt.start - 0.03);
+      try {
+        voiceGain.gain.setValueAtTime(persianVolume, Math.max(0, stopTime - 0.06));
+        voiceGain.gain.linearRampToValueAtTime(0, stopTime);
+        voiceSource.stop(stopTime);
+      } catch (_) {}
+    }
+
     voiceSource.connect(voiceGain);
     voiceGain.connect(offlineCtx.destination);
 
-    // Schedule exact chained start time (guarantees full sentence without cutoff)
-    voiceSource.start(lineStart);
+    // Schedule voice strictly at its subtitle start timestamp (Zero Drift)
+    voiceSource.start(st.start);
   }
 
   onProgress?.(75, 'در حال رندر نهایی صوت و ساخت فایل استودیویی WAV...');

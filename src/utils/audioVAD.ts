@@ -212,20 +212,10 @@ export function optimizeAndAlignSubtitlesWithAudio(
       const current = updated[i];
       const next = updated[i + 1];
 
-      // If current ends too close to or after the start of the next line, trim current
+      // If current ends too close to or after the start of the next line, trim current cleanly without ever shifting next.start
       if (current.end > next.start - minGap) {
-        const safeEnd = parseFloat(Math.max(current.start + 0.4, next.start - minGap).toFixed(2));
-        if (safeEnd < current.end) {
-          current.end = safeEnd;
-          collisionResolvedCount++;
-        } else if (safeEnd >= next.start) {
-          // If spacing is still cramped, shift next slightly forward if buffer allows
-          next.start = parseFloat((current.end + minGap).toFixed(2));
-          if (next.end <= next.start) {
-            next.end = parseFloat((next.start + 1.0).toFixed(2));
-          }
-          collisionResolvedCount++;
-        }
+        current.end = parseFloat(Math.max(current.start + 0.2, next.start - 0.05).toFixed(2));
+        collisionResolvedCount++;
       }
 
       current.startTimeStr = secondsToSrtTime(current.start);

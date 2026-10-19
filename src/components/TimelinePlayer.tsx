@@ -19,18 +19,30 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   RefreshCw,
+  Lock,
+  MoveHorizontal,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+  Wand2,
+  ChevronLeft,
+  ChevronRight,
+  Info,
 } from 'lucide-react';
 import { formatPlayerTime } from '../utils/srtParser';
 import {
   getAudioContext,
   renderDubbedTrack,
-  audioBufferToWav,
+  decodeBase64ToAudioBuffer,
 } from '../utils/audioMixer';
 import { deriveProjectOutputName } from '../utils/fileNaming';
 
 interface TimelinePlayerProps {
   subtitles: SubtitleItem[];
+  onUpdateSubtitle?: (id: number, partial: Partial<SubtitleItem>) => void;
+  onUpdateAllSubtitles?: (items: SubtitleItem[]) => void;
   originalAudioBuffer: AudioBuffer | null;
   originalAudioName: string;
   subtitleFileName?: string;
@@ -48,8 +60,20 @@ interface TimelinePlayerProps {
   sharedAudioBuffer?: AudioBuffer | null;
 }
 
+interface OverlapDetail {
+  prevSubId: number;
+  nextSubId: number;
+  prevIdx: number;
+  nextIdx: number;
+  overlapSec: number;
+  prevEnd: number;
+  nextStart: number;
+}
+
 export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
   subtitles,
+  onUpdateSubtitle,
+  onUpdateAllSubtitles,
   originalAudioBuffer,
   originalAudioName,
   subtitleFileName,
@@ -70,9 +94,17 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     (outputBaseName || '').trim() ||
     deriveProjectOutputName(originalAudioName, subtitleFileName) ||
     'persian_dub';
+
+  // Playback state
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
+
+  // Timeline UI state
+  const [zoomLevel, setZoomLevel] = useState<number>(1); // 1x to 3x
+  const [selectedSubId, setSelectedSubId] = useState<number | null>(null);
+  const [draggingSubId, setDraggingSubId] = useState<number | null>(null);
+  const [soloPlayingId, setSoloPlayingId] = useState<number | null>(null);
 
   // Rendered Output Audio State
   const [renderedMixBuffer, setRenderedMixBuffer] = useState<AudioBuffer | null>(
@@ -102,10 +134,15 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
   const audioCtxRef = useRef<AudioContext | null>(null);
   const masterSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const masterGainRef = useRef<GainNode | null>(null);
+  const soloSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const startEpochRef = useRef<number>(0);
   const currentTimeRef = useRef<number>(0);
   const isPlayingRef = useRef<boolean>(false);
   const animFrameIdRef = useRef<number | null>(null);
+
+  // Timeline container element ref for drag calculations
+  const timelineCanvasRef = useRef<HTMLDivElement | null>(null);
+  const dragStartInfoRef = useRef<{ clientX: number; initialOffset: number } | null>(null);
 
   // Keep ref synchronized
   currentTimeRef.current = currentTime;
@@ -121,11 +158,62 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     maxDuration = Math.max(maxDuration, originalAudioBuffer.duration);
   }
   for (const s of subtitles) {
+    const effectiveVoiceEnd = (s.start + (s.audioOffset || 0)) + (s.audioDuration || (s.end - s.start));
     if (s.end > maxDuration) {
       maxDuration = s.end;
     }
+    if (effectiveVoiceEnd > maxDuration) {
+      maxDuration = effectiveVoiceEnd;
+    }
   }
-  maxDuration = Math.ceil(maxDuration + 0.5);
+  maxDuration = Math.ceil(maxDuration + 1.0);
+
+  // Calculate Overlaps / Collisions across all voice clips
+  const overlaps: OverlapDetail[] = useMemo(() => {
+    const list: OverlapDetail[] = [];
+    if (subtitles.length < 2) return list;
+
+    // Sort by effective start time
+    const sorted = subtitles
+      .map((sub, idx) => ({
+        sub,
+        idx,
+        effectiveStart: Math.max(0, sub.start + (sub.audioOffset || 0)),
+        duration: sub.audioDuration || Math.max(0.6, sub.end - sub.start),
+      }))
+      .sort((a, b) => a.effectiveStart - b.effectiveStart);
+
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const current = sorted[i];
+      const next = sorted[i + 1];
+      const currentEnd = current.effectiveStart + current.duration;
+
+      // Overlap detected if current voice ends after next voice starts
+      if (currentEnd > next.effectiveStart + 0.05) {
+        const overlapSec = Number((currentEnd - next.effectiveStart).toFixed(2));
+        list.push({
+          prevSubId: current.sub.id,
+          nextSubId: next.sub.id,
+          prevIdx: current.idx,
+          nextIdx: next.idx,
+          overlapSec,
+          prevEnd: currentEnd,
+          nextStart: next.effectiveStart,
+        });
+      }
+    }
+    return list;
+  }, [subtitles]);
+
+  // Set of sub IDs involved in collisions for fast badge & highlight lookup
+  const collidingSubIdMap = useMemo(() => {
+    const map = new Map<number, { isPrev: boolean; isNext: boolean; overlapSec: number }>();
+    for (const ov of overlaps) {
+      map.set(ov.prevSubId, { isPrev: true, isNext: false, overlapSec: ov.overlapSec });
+      map.set(ov.nextSubId, { isPrev: false, isNext: true, overlapSec: ov.overlapSec });
+    }
+    return map;
+  }, [overlaps]);
 
   // Stop playback cleanly
   const stopPlayback = () => {
@@ -142,12 +230,20 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
       } catch (_) {}
       masterGainRef.current = null;
     }
+    if (soloSourceRef.current) {
+      try {
+        soloSourceRef.current.stop();
+        soloSourceRef.current.disconnect();
+      } catch (_) {}
+      soloSourceRef.current = null;
+    }
     if (animFrameIdRef.current) {
       cancelAnimationFrame(animFrameIdRef.current);
       animFrameIdRef.current = null;
     }
     setIsPlaying(false);
     isPlayingRef.current = false;
+    setSoloPlayingId(null);
   };
 
   // Start playback of the EXACT rendered output mix buffer
@@ -203,12 +299,50 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     animFrameIdRef.current = requestAnimationFrame(tick);
   };
 
-  // Fingerprint of all inputs that determine the final rendered audio file
+  // Solo preview for a single line's voice
+  const handlePlaySoloVoice = async (sub: SubtitleItem) => {
+    if (soloPlayingId === sub.id) {
+      if (soloSourceRef.current) {
+        try {
+          soloSourceRef.current.stop();
+          soloSourceRef.current.disconnect();
+        } catch (_) {}
+        soloSourceRef.current = null;
+      }
+      setSoloPlayingId(null);
+      return;
+    }
+
+    if (!sub.audioBase64) return;
+
+    stopPlayback();
+    try {
+      const ctx = getAudioContext();
+      const buf = await decodeBase64ToAudioBuffer(sub.audioBase64);
+      const source = ctx.createBufferSource();
+      source.buffer = buf;
+      source.connect(ctx.destination);
+
+      source.onended = () => {
+        setSoloPlayingId(null);
+        soloSourceRef.current = null;
+      };
+
+      soloSourceRef.current = source;
+      setSoloPlayingId(sub.id);
+      source.start(0);
+    } catch (err) {
+      console.error('Failed to play solo voice', err);
+      setSoloPlayingId(null);
+    }
+  };
+
+  // Fingerprint of all inputs including audioOffsets that determine the final rendered audio file
   const mixFingerprint = useMemo(() => {
     const subsHash = subtitles
       .map(
         (s) =>
-          `${s.id}_${s.start.toFixed(2)}_${s.end.toFixed(2)}_${
+          `${s.id}_${s.start.toFixed(2)}_${s.end.toFixed(2)}_${(s.audioOffset || 0).toFixed(2)}_${
             s.audioBase64
               ? `${s.audioBase64.length}_${s.audioBase64.slice(0, 16)}_${s.audioBase64.slice(-16)}`
               : 'none'
@@ -228,11 +362,10 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     duckingAmount,
   ]);
 
-  // Master Render Engine: automatically builds the exact output audio file whenever any voice or setting changes!
+  // Master Render Engine: automatically builds the exact output audio file whenever any voice, offset or setting changes!
   useEffect(() => {
     let isCancelled = false;
 
-    // Small debounce to avoid redundant renders while dragging sliders
     const timer = setTimeout(async () => {
       const hasVoices = subtitles.some((s) => Boolean(s.audioBase64));
       if (!hasVoices && !originalAudioBuffer) {
@@ -269,7 +402,6 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
           setIsRenderingMix(false);
           onMixRendered?.(result);
 
-          // If playing during a voice update, smoothly continue playing with the new audio!
           if (isPlayingRef.current) {
             startPlayback(currentTimeRef.current);
           }
@@ -296,10 +428,122 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     };
   }, []);
 
+  // Global mouse listeners for dragging voice clips left/right on timeline
+  useEffect(() => {
+    if (draggingSubId === null) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragStartInfoRef.current || !timelineCanvasRef.current) return;
+      const rect = timelineCanvasRef.current.getBoundingClientRect();
+      const totalWidthPx = rect.width;
+      if (totalWidthPx <= 0) return;
+
+      const deltaX = e.clientX - dragStartInfoRef.current.clientX;
+      const secondsPerPixel = maxDuration / totalWidthPx;
+      const deltaSec = deltaX * secondsPerPixel;
+
+      const newOffset = Math.round((dragStartInfoRef.current.initialOffset + deltaSec) * 100) / 100;
+      // Clamp between -15s and +15s
+      const clampedOffset = Math.max(-15, Math.min(15, newOffset));
+
+      onUpdateSubtitle?.(draggingSubId, { audioOffset: clampedOffset });
+    };
+
+    const handleMouseUp = () => {
+      setDraggingSubId(null);
+      dragStartInfoRef.current = null;
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [draggingSubId, maxDuration, onUpdateSubtitle]);
+
+  // Start dragging a voice clip
+  const handleStartDragVoice = (e: React.MouseEvent, sub: SubtitleItem) => {
+    e.stopPropagation();
+    setDraggingSubId(sub.id);
+    setSelectedSubId(sub.id);
+    dragStartInfoRef.current = {
+      clientX: e.clientX,
+      initialOffset: sub.audioOffset || 0,
+    };
+  };
+
+  // Nudge audio offset by fixed step (e.g. +0.1s or -0.1s)
+  const handleNudgeOffset = (subId: number, delta: number) => {
+    const sub = subtitles.find((s) => s.id === subId);
+    if (!sub || !onUpdateSubtitle) return;
+    const current = sub.audioOffset || 0;
+    const next = Math.round((current + delta) * 100) / 100;
+    const clamped = Math.max(-15, Math.min(15, next));
+    onUpdateSubtitle(subId, { audioOffset: clamped });
+  };
+
+  // Reset offset for a specific line
+  const handleResetLineOffset = (subId: number) => {
+    onUpdateSubtitle?.(subId, { audioOffset: 0 });
+  };
+
+  // Automatic One-Click Overlap Resolver: adjusts offsets so no voice overlaps another!
+  const handleAutoResolveOverlaps = () => {
+    if (overlaps.length === 0 || !onUpdateAllSubtitles) return;
+
+    // Sort by chronological effective start
+    const sorted = [...subtitles].sort((a, b) => {
+      const startA = a.start + (a.audioOffset || 0);
+      const startB = b.start + (b.audioOffset || 0);
+      return startA - startB;
+    });
+
+    const offsetMap = new Map<number, number>();
+    let lastVoiceEnd = 0;
+
+    for (let i = 0; i < sorted.length; i++) {
+      const item = sorted[i];
+      const origStart = item.start;
+      const currentOffset = item.audioOffset || 0;
+      const currentStart = Math.max(0, origStart + currentOffset);
+      const dur = item.audioDuration || Math.max(0.6, item.end - item.start);
+
+      // If current voice collides with previous voice
+      if (currentStart < lastVoiceEnd + 0.08) {
+        // Shift this line so it starts cleanly 80ms after previous ends
+        const cleanStart = lastVoiceEnd + 0.08;
+        const newOffset = Math.round((cleanStart - origStart) * 100) / 100;
+        offsetMap.set(item.id, newOffset);
+        lastVoiceEnd = cleanStart + dur;
+      } else {
+        offsetMap.set(item.id, currentOffset);
+        lastVoiceEnd = currentStart + dur;
+      }
+    }
+
+    const updated = subtitles.map((s) => ({
+      ...s,
+      audioOffset: offsetMap.has(s.id) ? offsetMap.get(s.id) : s.audioOffset,
+    }));
+    onUpdateAllSubtitles(updated);
+  };
+
+  // Reset all offsets back to 0.00s (strictly anchored to subtitle start)
+  const handleResetAllOffsets = () => {
+    if (!onUpdateAllSubtitles) return;
+    const reset = subtitles.map((s) => ({ ...s, audioOffset: 0 }));
+    onUpdateAllSubtitles(reset);
+  };
+
   const handleTogglePlay = () => {
     if (isPlaying) {
       stopPlayback();
     } else {
+      if (!renderedMixBuffer && isRenderingMix) {
+        setRenderProgressMsg('صوت در حال همگام‌سازی نهایی است؛ بلافاصله پس از تکمیل پخش خواهد شد...');
+        return;
+      }
       startPlayback(currentTime);
     }
   };
@@ -332,45 +576,7 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
     }
   };
 
-  // Manual trigger to immediately force rebuild the master output mix
-  const handleForceReRenderMix = async () => {
-    const hasVoices = subtitles.some((s) => Boolean(s.audioBase64));
-    if (!hasVoices && !originalAudioBuffer) return;
-
-    setIsRenderingMix(true);
-    setRenderError(null);
-    setRenderProgressMsg('در حال رندر و میکس مجدد فایل خروجی...');
-
-    try {
-      const result = await renderDubbedTrack(
-        {
-          originalBuffer: originalAudioBuffer,
-          subtitles,
-          mixMode,
-          persianVolume,
-          backgroundVolume,
-          duckingAmount,
-        },
-        (pct, msg) => {
-          setRenderProgressMsg(msg);
-        }
-      );
-      setRenderedMixBuffer(result.audioBuffer);
-      setRenderedWavBlob(result.wavBlob);
-      setIsRenderingMix(false);
-      onMixRendered?.(result);
-
-      if (isPlayingRef.current) {
-        startPlayback(currentTimeRef.current);
-      }
-    } catch (err: any) {
-      console.error('Force mix render failed:', err);
-      setRenderError(err.message || 'خطا در رندر فایل صوتی خروجی');
-      setIsRenderingMix(false);
-    }
-  };
-
-  // Direct download of the current rendered mix right from Stage 4 with exact video/srt base name
+  // Direct download of the current rendered mix right from Stage 4
   const handleDownloadCurrentMix = () => {
     if (!renderedWavBlob) return;
     const a = document.createElement('a');
@@ -382,34 +588,22 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
   };
 
   // Find currently active subtitle line for cinema preview
-  const currentActiveSub = subtitles.find(
-    (s) => currentTime >= s.start && currentTime <= s.end + 0.3
-  );
-
-  // Generate real audio waveform bars from the rendered output audio
-  const waveformPeaks = useMemo(() => {
-    const buf = renderedMixBuffer || originalAudioBuffer;
-    if (!buf) return [];
-    try {
-      const channelData = buf.getChannelData(0);
-      const numBars = 75;
-      const step = Math.floor(channelData.length / numBars);
-      const peaks: number[] = [];
-      for (let i = 0; i < numBars; i++) {
-        let max = 0;
-        const start = i * step;
-        const end = Math.min(channelData.length, start + step);
-        for (let j = start; j < end; j += 8) {
-          const val = Math.abs(channelData[j]);
-          if (val > max) max = val;
-        }
-        peaks.push(Math.min(100, Math.max(14, Math.round(max * 100))));
+  const currentActiveSub = useMemo(() => {
+    if (!subtitles || subtitles.length === 0) return null;
+    for (let i = 0; i < subtitles.length; i++) {
+      const s = subtitles[i];
+      const nextS = subtitles[i + 1];
+      const lineEnd = nextS ? Math.min(s.end + 0.3, nextS.start - 0.02) : s.end + 0.5;
+      if (currentTime >= s.start && currentTime <= lineEnd) {
+        return s;
       }
-      return peaks;
-    } catch (_) {
-      return [];
     }
-  }, [renderedMixBuffer, originalAudioBuffer]);
+    return null;
+  }, [subtitles, currentTime]);
+
+  const selectedSub = useMemo(() => {
+    return subtitles.find((s) => s.id === selectedSubId) || null;
+  }, [subtitles, selectedSubId]);
 
   return (
     <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl">
@@ -421,11 +615,11 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
               ۴
             </span>
             <h2 className="text-xl font-bold text-white">
-              استودیو میکس، خط زمان (Timeline) و پخش همگام
+              استودیو میکس، خط زمان (Timeline) و تنظیم دستی/خودکار سینک
             </h2>
           </div>
-          <p className="text-xs sm:text-sm text-slate-400 mt-1">
-            فایل در حال پخش در این بخش دقیقاً همان فایل خروجی نهایی استودیو است. با تغییر هر ویس، خروجی به‌صورت آنی بازسازی و پخش می‌شود.
+          <p className="text-xs sm:text-sm text-slate-400 mt-1 leading-relaxed">
+            متن و زمان‌بندی زیرنویس به صورت <strong className="text-slate-200">ثابت و قفل‌شده</strong> روی تایم‌لاین قرار دارند؛ شما می‌توانید صوت استخراج شده هر قسمت را به راحتی با کشیدن (Drag) یا کلیدهای جابجایی <strong className="text-amber-300">عقب و جلو</strong> کنید و در صورت تداخل یا افتادن صداها روی یکدیگر، سیستم هشدار داده و با یک کلیک آن را برطرف می‌کند.
           </p>
         </div>
 
@@ -434,12 +628,12 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
           {isRenderingMix ? (
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-medium animate-pulse">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span>{renderProgressMsg || 'در حال رندر فایل خروجی...'}</span>
+              <span>{renderProgressMsg || 'در حال رندر فایل خروجی همگام...'}</span>
             </div>
           ) : renderedMixBuffer ? (
             <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              <span>فایل خروجی نهایی همگام‌شده (WAV 16-bit PCM)</span>
+              <span>فایل خروجی میکس آماده است</span>
             </div>
           ) : null}
 
@@ -448,25 +642,86 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
               type="button"
               onClick={handleDownloadCurrentMix}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 hover:text-amber-200 text-xs font-semibold transition shadow-sm font-mono"
-              title={`دانلود فایل صوتی میکس نهایی همنام با فایل ورودی: ${effectiveBaseName}.wav`}
+              title={`دانلود فایل صوتی میکس نهایی: ${effectiveBaseName}.wav`}
             >
               <Download className="w-3.5 h-3.5" />
-              <span>دانلود خروجی میکس ({effectiveBaseName}.wav)</span>
+              <span>دانلود خروجی ({effectiveBaseName}.wav)</span>
             </button>
           )}
 
           <button
             type="button"
-            onClick={handleForceReRenderMix}
+            onClick={() => {
+              if (onUpdateAllSubtitles) {
+                // Trigger a re-render
+                onUpdateAllSubtitles([...subtitles]);
+              }
+            }}
             disabled={isRenderingMix}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-semibold transition disabled:opacity-50"
-            title="میکس و به‌روزرسانی مجدد فایل خروجی با آخرین تغییرات صداها"
+            title="میکس مجدد صداها با آخرین آفست‌ها"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isRenderingMix ? 'animate-spin' : ''}`} />
-            <span>میکس مجدد صداها</span>
+            <span>میکس مجدد</span>
           </button>
         </div>
       </div>
+
+      {/* Overlap & Collision Alert Banner (اگر صدایی روی اونیکی صدا میره هم مشخص باشه) */}
+      {overlaps.length > 0 ? (
+        <div className="mb-6 p-4 rounded-2xl bg-rose-950/40 border border-rose-500/50 text-rose-200 text-xs shadow-lg animate-in fade-in duration-200">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5 animate-bounce" />
+              <div>
+                <div className="font-bold text-rose-300 text-sm flex items-center gap-2">
+                  <span>هشدار تداخل صداها: {overlaps.length} دیالوگ روی جمله بعدی می‌افتد!</span>
+                  <span className="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 text-[11px] font-mono border border-rose-500/30">
+                    Collision Detected
+                  </span>
+                </div>
+                <div className="text-rose-300/80 mt-1 leading-relaxed">
+                  مدت زمان گویندگی برخی جملات بیشتر از فاصله تا جمله بعدی است (مثلاً خط{' '}
+                  {overlaps.map((o) => `#${o.prevIdx + 1} با #${o.nextIdx + 1} (${o.overlapSec}s)`).slice(0, 3).join('، ')}
+                  {overlaps.length > 3 ? ` و ${overlaps.length - 3} مورد دیگر` : ''}).
+                  می‌توانید صداها را عقب/جلو کنید یا با یک کلیک تداخل‌ها را خودکار برطرف نمایید.
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleAutoResolveOverlaps}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-rose-500 to-amber-500 hover:from-rose-400 hover:to-amber-400 text-slate-950 font-bold transition text-xs shadow-md"
+                title="جابجایی خودکار صوت‌ها جهت برطرف کردن تداخل جملات"
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                <span>رفع خودکار تداخل‌ها (Shift To Fit)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleResetAllOffsets}
+                className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition text-xs border border-slate-700"
+                title="بازنشانی تمام صداها به زمان شروع زیرنویس"
+              >
+                ریست آفست‌ها
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="mb-6 p-3 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>هیچ تداخل صوتی وجود ندارد؛ تمام جملات به ترتیب و بدون هم‌پوشانی پایان می‌یابند.</span>
+          </div>
+          <div className="text-[11px] text-emerald-400/80 font-mono">
+            {subtitles.length} دیالوگ منطبق با تصویر
+          </div>
+        </div>
+      )}
 
       {/* Mix Mode Selector */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6 p-2 rounded-2xl bg-slate-950/70 border border-slate-800/80">
@@ -517,31 +772,8 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
         </div>
       </div>
 
-      {/* Render Error Alert */}
-      {renderError && (
-        <div className="mb-6 p-4 rounded-2xl bg-rose-950/40 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-          <span>{renderError}</span>
-        </div>
-      )}
-
-      {/* No Voices Notice */}
-      {readyVoicesCount === 0 && !originalAudioBuffer && (
-        <div className="mb-6 p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center gap-3">
-          <Sparkles className="w-5 h-5 text-amber-400 shrink-0" />
-          <div>
-            <div className="font-bold text-amber-300 mb-0.5">
-              هنوز ویس دوبله‌ای تولید نشده است
-            </div>
-            <div className="text-slate-400">
-              برای ساخت و شنیدن فایل خروجی دوبله، ابتدا در مرحله ۳ (صداپیشگی) دکمه «تولید صدای دوبلورها» را بزنید.
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Cinema Screen Subtitle Overlay Box */}
-      <div className="mb-6 relative rounded-2xl bg-gradient-to-b from-slate-950 to-slate-900 border border-slate-800 p-6 flex flex-col items-center justify-center min-h-[140px] text-center overflow-hidden shadow-inner">
+      <div className="mb-6 relative rounded-2xl bg-gradient-to-b from-slate-950 to-slate-900 border border-slate-800 p-6 flex flex-col items-center justify-center min-h-[135px] text-center overflow-hidden shadow-inner">
         <div className="absolute top-3 right-4 flex items-center gap-2 text-[11px] text-slate-500">
           <span
             className={`w-2 h-2 rounded-full ${
@@ -561,7 +793,11 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
             </div>
             <div className="mt-2 inline-flex items-center gap-2 px-3 py-0.5 rounded-full bg-slate-800/80 border border-slate-700 text-[11px] text-amber-400/90">
               <span>گوینده: {currentActiveSub.voice}</span>
-              {currentActiveSub.emotion && <span>&bull; لحن: {currentActiveSub.emotion}</span>}
+              {currentActiveSub.audioOffset !== undefined && currentActiveSub.audioOffset !== 0 && (
+                <span className="font-mono text-cyan-300">
+                  &bull; آفست: {currentActiveSub.audioOffset > 0 ? `+${currentActiveSub.audioOffset}` : currentActiveSub.audioOffset}s
+                </span>
+              )}
               {currentActiveSub.audioBase64 && (
                 <span className="text-emerald-400 font-mono">&bull; صوت استودیویی آماده</span>
               )}
@@ -569,106 +805,364 @@ export const TimelinePlayer: React.FC<TimelinePlayerProps> = ({
           </div>
         ) : (
           <div className="text-slate-500 text-xs flex flex-col items-center gap-1">
-            <span>در این ثانیه دیالوگی وجود ندارد (سکوت یا صدای زمینه فیلم)</span>
+            <span>در این ثانیه دیالوگی وجود ندارد (سکوت یا موسیقی فیلم)</span>
             <span className="text-[11px] text-slate-600">
-              برای پخش یا پرش به خطوط دیالوگ از نوار پایین استفاده کنید
+              برای پخش یا پرش به خطوط دیالوگ از خط زمان زیر استفاده کنید
             </span>
           </div>
         )}
       </div>
 
-      {/* Visual Timeline Track with Real Rendered Waveform */}
-      <div className="mb-6 p-4 bg-slate-950 rounded-2xl border border-slate-800 select-none">
-        {/* Time ruler */}
-        <div className="flex justify-between text-[11px] font-mono text-slate-500 mb-2 px-1">
-          <span>00:00</span>
-          <span>{formatPlayerTime(maxDuration / 4)}</span>
-          <span>{formatPlayerTime(maxDuration / 2)}</span>
-          <span>{formatPlayerTime((3 * maxDuration) / 4)}</span>
-          <span>{formatPlayerTime(maxDuration)}</span>
-        </div>
-
-        {/* Timeline Interactive Canvas Area */}
-        <div
-          onClick={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            const clickX = e.clientX - rect.left;
-            const ratio = clickX / rect.width;
-            handleSeek(ratio * maxDuration);
-          }}
-          className="relative h-24 bg-slate-900/90 rounded-xl overflow-hidden cursor-pointer border border-slate-800 hover:border-slate-700 transition"
-        >
-          {/* Subtle grid lines */}
-          <div className="absolute inset-0 flex justify-between pointer-events-none opacity-20">
-            <div className="border-r border-slate-700 w-1/4 h-full" />
-            <div className="border-r border-slate-700 w-1/4 h-full" />
-            <div className="border-r border-slate-700 w-1/4 h-full" />
+      {/* STUDIO DUAL-TRACK TIMELINE */}
+      <div className="mb-6 p-4 sm:p-5 bg-slate-950 rounded-3xl border border-slate-800 select-none shadow-xl">
+        {/* Timeline Controls & Zoom Bar */}
+        <div className="flex items-center justify-between gap-4 mb-3 pb-3 border-b border-slate-800/80 text-xs">
+          <div className="flex items-center gap-3">
+            <span className="font-bold text-slate-300 flex items-center gap-1.5">
+              <MoveHorizontal className="w-4 h-4 text-amber-400" />
+              <span>خط زمان چندترکه (Multi-Track Timeline):</span>
+            </span>
+            <span className="text-slate-500 text-[11px] hidden sm:inline">
+              روی ترک صوت دوبله کلیک کنید یا آن را به چپ/راست بکشید تا سینک شود
+            </span>
           </div>
 
-          {/* Actual Rendered Audio Waveform */}
-          {waveformPeaks.length > 0 && (
-            <div className="absolute inset-x-0 bottom-1 top-7 flex items-center opacity-35 pointer-events-none px-2">
-              <div className="w-full h-full flex items-center justify-between gap-[1px]">
-                {waveformPeaks.map((peak, i) => (
-                  <div
-                    key={i}
-                    className="flex-1 bg-gradient-to-t from-amber-500 to-purple-400 rounded-full mx-[0.5px]"
-                    style={{ height: `${peak}%` }}
-                  />
+          {/* Zoom Level Selector */}
+          <div className="flex items-center gap-2 bg-slate-900 px-2 py-1 rounded-xl border border-slate-800">
+            <span className="text-[11px] text-slate-400">بزرگ‌نمایی:</span>
+            {[1, 1.5, 2, 3].map((lvl) => (
+              <button
+                key={lvl}
+                type="button"
+                onClick={() => setZoomLevel(lvl)}
+                className={`px-2 py-0.5 rounded-lg text-[11px] font-mono transition ${
+                  zoomLevel === lvl
+                    ? 'bg-amber-500 text-slate-950 font-bold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {lvl}x
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Scrollable Container when Zoom > 1 */}
+        <div className="overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-700">
+          <div
+            style={{ width: `${zoomLevel * 100}%`, minWidth: '100%' }}
+            className="transition-all duration-150 relative"
+          >
+            {/* Time Ruler */}
+            <div className="flex justify-between text-[11px] font-mono text-slate-500 mb-2 px-1">
+              <span>00:00</span>
+              <span>{formatPlayerTime(maxDuration * 0.25)}</span>
+              <span>{formatPlayerTime(maxDuration * 0.5)}</span>
+              <span>{formatPlayerTime(maxDuration * 0.75)}</span>
+              <span>{formatPlayerTime(maxDuration)}</span>
+            </div>
+
+            {/* Interactive Timeline Canvas */}
+            <div
+              ref={timelineCanvasRef}
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const ratio = clickX / rect.width;
+                handleSeek(ratio * maxDuration);
+              }}
+              className="relative bg-slate-900/90 rounded-2xl border border-slate-800 p-3 overflow-hidden cursor-pointer"
+            >
+              {/* Subtle Grid Markings */}
+              <div className="absolute inset-0 flex justify-between pointer-events-none opacity-15">
+                {[...Array(12)].map((_, i) => (
+                  <div key={i} className="border-r border-slate-600 w-full h-full" />
                 ))}
               </div>
-            </div>
-          )}
 
-          {/* Subtitle / Persian Speech Blocks on Timeline */}
-          {subtitles.map((sub, idx) => {
-            const leftPct = (sub.start / maxDuration) * 100;
-            const widthPct = Math.max(1.5, ((sub.end - sub.start) / maxDuration) * 100);
-            const isLineActive = currentTime >= sub.start && currentTime <= sub.end;
-            const hasAudio = Boolean(sub.audioBase64);
+              {/* TRACK 1: FIXED REFERENCE SUBTITLE TRACK (متن زیرنویس با زمان‌بندی ثابت) */}
+              <div className="relative h-14 mb-3 rounded-xl bg-slate-950/80 border border-slate-800/80 p-1 flex items-center">
+                {/* Track label */}
+                <div className="absolute right-2 top-1 text-[9px] font-bold text-slate-500 tracking-wider flex items-center gap-1 z-0 pointer-events-none">
+                  <Lock className="w-2.5 h-2.5 text-amber-500/70" />
+                  <span>ترک ۱: زیرنویس مرجع فیلم (زمان ثابت)</span>
+                </div>
 
-            return (
+                {subtitles.map((sub, idx) => {
+                  const leftPct = (sub.start / maxDuration) * 100;
+                  const widthPct = Math.max(1.8, ((sub.end - sub.start) / maxDuration) * 100);
+                  const isCurrentActive = currentTime >= sub.start && currentTime <= sub.end;
+                  const isSelected = selectedSubId === sub.id;
+
+                  return (
+                    <div
+                      key={`sub_fixed_${sub.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedSubId(sub.id);
+                        handleSeek(sub.start);
+                      }}
+                      title={`زیرنویس خط #${idx + 1} (${sub.startTimeStr} تا ${sub.endTimeStr})`}
+                      className={`absolute top-1 bottom-1 rounded-lg px-2 flex flex-col justify-center border transition-all text-[10px] overflow-hidden ${
+                        isSelected
+                          ? 'border-amber-400 bg-amber-500/20 text-amber-200 z-10 shadow-md ring-1 ring-amber-400/50'
+                          : isCurrentActive
+                          ? 'border-amber-500/80 bg-amber-500/10 text-amber-300 z-10'
+                          : 'border-slate-700/80 bg-slate-800/70 text-slate-300 hover:border-slate-600'
+                      }`}
+                      style={{
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                      }}
+                    >
+                      <div className="flex items-center justify-between text-[9px] font-mono leading-none opacity-80">
+                        <span>#{idx + 1}</span>
+                        <span>{(sub.end - sub.start).toFixed(1)}s</span>
+                      </div>
+                      <div className="truncate font-sans font-medium text-[10px] mt-0.5">
+                        {sub.farsiText || sub.originalText}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* TRACK 2: INTERACTIVE DUBBED VOICE AUDIO TRACK (صوت دوبله فارسی با قابلیت عقب/جلو کردن) */}
+              <div className="relative h-18 rounded-xl bg-slate-950/80 border border-slate-800/80 p-1 flex items-center">
+                {/* Track label */}
+                <div className="absolute right-2 top-1 text-[9px] font-bold text-slate-500 tracking-wider flex items-center gap-1 z-0 pointer-events-none">
+                  <Mic2 className="w-2.5 h-2.5 text-emerald-400/80" />
+                  <span>ترک ۲: صوت دوبله فارسی (با کشیدن به چپ/راست سینک کنید)</span>
+                </div>
+
+                {subtitles.map((sub, idx) => {
+                  const offset = sub.audioOffset || 0;
+                  const effectiveStart = Math.max(0, sub.start + offset);
+                  const effectiveDuration = sub.audioDuration || Math.max(0.6, sub.end - sub.start);
+                  const leftPct = (effectiveStart / maxDuration) * 100;
+                  const widthPct = Math.max(1.8, (effectiveDuration / maxDuration) * 100);
+
+                  const isCurrentPlaying = currentTime >= effectiveStart && currentTime <= effectiveStart + effectiveDuration;
+                  const isSelected = selectedSubId === sub.id;
+                  const isDragging = draggingSubId === sub.id;
+                  const collisionInfo = collidingSubIdMap.get(sub.id);
+                  const hasAudio = Boolean(sub.audioBase64);
+
+                  return (
+                    <div
+                      key={`voice_${sub.id}`}
+                      onMouseDown={(e) => handleStartDragVoice(e, sub)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedSubId(sub.id);
+                      }}
+                      title={`صوت دیالوگ #${idx + 1} | آفست: ${offset > 0 ? `+${offset}` : offset} ثانیه (برای جابجایی بکشید)`}
+                      className={`absolute top-1 bottom-1 rounded-xl px-2.5 flex flex-col justify-center border transition-all text-[10px] overflow-hidden select-none cursor-ew-resize group ${
+                        isDragging
+                          ? 'border-cyan-400 bg-cyan-950/90 text-cyan-200 ring-2 ring-cyan-400 z-30 shadow-2xl scale-[1.03]'
+                          : collisionInfo
+                          ? 'border-rose-500 bg-rose-950/75 text-rose-200 ring-2 ring-rose-500/50 z-20 shadow-lg'
+                          : isSelected
+                          ? 'border-amber-400 bg-amber-500/25 text-amber-200 ring-2 ring-amber-400/60 z-20 shadow-lg'
+                          : isCurrentPlaying
+                          ? 'border-emerald-400 bg-emerald-950/80 text-emerald-200 ring-1 ring-emerald-400 z-10'
+                          : hasAudio
+                          ? 'border-emerald-500/60 bg-emerald-950/60 text-emerald-300 hover:border-emerald-400'
+                          : 'border-slate-700 bg-slate-800/80 text-slate-400'
+                      }`}
+                      style={{
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                      }}
+                    >
+                      {/* Collision Warning Stripe Overlay */}
+                      {collisionInfo && (
+                        <div
+                          className="absolute inset-0 pointer-events-none opacity-25"
+                          style={{
+                            backgroundImage:
+                              'repeating-linear-gradient(45deg, #f43f5e 0, #f43f5e 8px, transparent 8px, transparent 16px)',
+                          }}
+                        />
+                      )}
+
+                      {/* Header with Line #, Offset Badge & Voice Name */}
+                      <div className="flex items-center justify-between text-[9px] font-mono leading-none z-10">
+                        <span className="font-bold">
+                          #{idx + 1} {sub.voice}
+                        </span>
+                        {offset !== 0 ? (
+                          <span
+                            className={`px-1 rounded text-[8px] font-bold ${
+                              offset > 0
+                                ? 'bg-cyan-500/30 text-cyan-200 border border-cyan-500/40'
+                                : 'bg-purple-500/30 text-purple-200 border border-purple-500/40'
+                            }`}
+                          >
+                            {offset > 0 ? `+${offset}` : offset}s
+                          </span>
+                        ) : (
+                          <span className="text-[8px] opacity-70">
+                            {effectiveDuration.toFixed(1)}s
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Line dialogue text */}
+                      <div className="truncate font-sans font-medium text-[10px] mt-0.5 z-10">
+                        {sub.farsiText || sub.originalText}
+                      </div>
+
+                      {/* Collision Badge Alert */}
+                      {collisionInfo && (
+                        <div className="text-[8px] font-bold text-rose-300 flex items-center gap-1 mt-0.5 z-10 truncate">
+                          <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+                          <span>تداخل {collisionInfo.overlapSec} ثانیه</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Master Playhead Line */}
               <div
-                key={sub.id}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleSeek(sub.start);
-                }}
-                title={`خط ${idx + 1}: ${sub.farsiText || sub.originalText} (کلیک برای پرش)`}
-                className={`absolute top-2.5 bottom-2.5 rounded-lg px-2 flex flex-col justify-center border transition-all text-[10px] overflow-hidden cursor-pointer ${
-                  isLineActive
-                    ? 'bg-amber-500 border-amber-300 text-slate-950 font-bold z-10 scale-[1.03] shadow-lg shadow-amber-500/30'
-                    : hasAudio
-                    ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300 hover:border-emerald-400'
-                    : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:border-slate-600'
-                }`}
+                className="absolute top-0 bottom-0 w-[2px] bg-red-500 shadow-md shadow-red-500 pointer-events-none z-40"
                 style={{
-                  left: `${leftPct}%`,
-                  width: `${widthPct}%`,
+                  left: `${(currentTime / maxDuration) * 100}%`,
                 }}
               >
-                <div className="font-mono text-[9px] truncate flex items-center justify-between">
-                  <span>#{idx + 1}</span>
-                  {hasAudio && <span className="text-[8px] font-sans opacity-90">{sub.voice}</span>}
-                </div>
-                <div className="truncate font-sans font-medium">
-                  {sub.farsiText || sub.originalText}
-                </div>
+                <div className="w-3 h-3 rounded-full bg-red-500 -translate-x-[5px] -translate-y-1 shadow" />
               </div>
-            );
-          })}
-
-          {/* Playhead Cursor */}
-          <div
-            className="absolute top-0 bottom-0 w-[2px] bg-red-500 shadow-md shadow-red-500 pointer-events-none z-20"
-            style={{
-              left: `${(currentTime / maxDuration) * 100}%`,
-            }}
-          >
-            <div className="w-2.5 h-2.5 rounded-full bg-red-500 -translate-x-[4px] -translate-y-1" />
+            </div>
           </div>
         </div>
       </div>
+
+      {/* SELECTED LINE SYNC INSPECTOR & FINE-TUNING PANEL */}
+      {selectedSub && (
+        <div className="mb-6 p-4 sm:p-5 rounded-2xl bg-slate-950/90 border border-amber-500/30 shadow-xl animate-in fade-in duration-150">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-3 mb-3 border-b border-slate-800">
+            <div className="flex items-center gap-3">
+              <span className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-300 font-bold flex items-center justify-center text-xs border border-amber-500/30 font-mono">
+                #{subtitles.findIndex((s) => s.id === selectedSub.id) + 1}
+              </span>
+              <div>
+                <div className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                  <span>تنظیم و سینک اختصاصی دیالوگ:</span>
+                  <span className="text-xs text-amber-300 font-sans">{selectedSub.farsiText || selectedSub.originalText}</span>
+                </div>
+                <div className="text-[11px] text-slate-400 flex items-center gap-3 mt-0.5 font-mono">
+                  <span>زمان زیرنویس: {selectedSub.startTimeStr} تا {selectedSub.endTimeStr} ({(selectedSub.end - selectedSub.start).toFixed(2)}s)</span>
+                  {selectedSub.audioDuration && (
+                    <span className="text-emerald-400">طول صوت: {selectedSub.audioDuration.toFixed(2)}s</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Solo Preview Button for Selected Line */}
+            <div className="flex items-center gap-2">
+              {selectedSub.audioBase64 ? (
+                <button
+                  type="button"
+                  onClick={() => handlePlaySoloVoice(selectedSub)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+                    soloPlayingId === selectedSub.id
+                      ? 'bg-rose-500 text-white'
+                      : 'bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
+                  }`}
+                >
+                  {soloPlayingId === selectedSub.id ? (
+                    <>
+                      <Pause className="w-3.5 h-3.5 fill-current" />
+                      <span>توقف تست صوت</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>تست صدای این جمله</span>
+                    </>
+                  )}
+                </button>
+              ) : (
+                <span className="text-[11px] text-slate-500">صوت این خط هنوز ساخته نشده است</span>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setSelectedSubId(null)}
+                className="text-xs text-slate-400 hover:text-slate-200 px-2 py-1"
+              >
+                بستن پنل &times;
+              </button>
+            </div>
+          </div>
+
+          {/* Precision Offset Slider & Quick Nudges */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+            {/* Slider */}
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-slate-300 whitespace-nowrap">جابجایی زمانی (Offset):</span>
+              <input
+                type="range"
+                min="-5"
+                max="5"
+                step="0.05"
+                value={selectedSub.audioOffset || 0}
+                onChange={(e) =>
+                  onUpdateSubtitle?.(selectedSub.id, {
+                    audioOffset: parseFloat(e.target.value),
+                  })
+                }
+                className="w-full accent-amber-500 cursor-pointer"
+              />
+              <span className="font-mono text-xs w-16 text-center py-1 px-2 rounded-lg bg-slate-900 border border-slate-800 text-amber-300 font-bold">
+                {(selectedSub.audioOffset || 0) > 0 ? `+${(selectedSub.audioOffset || 0).toFixed(2)}` : (selectedSub.audioOffset || 0).toFixed(2)}s
+              </span>
+            </div>
+
+            {/* Quick Nudge Buttons */}
+            <div className="flex flex-wrap items-center justify-start md:justify-end gap-1.5 text-xs">
+              <button
+                type="button"
+                onClick={() => handleNudgeOffset(selectedSub.id, -0.5)}
+                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 transition font-mono"
+              >
+                -۰.۵ ثانیه
+              </button>
+              <button
+                type="button"
+                onClick={() => handleNudgeOffset(selectedSub.id, -0.1)}
+                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 transition font-mono"
+              >
+                -۰.۱ ثانیه
+              </button>
+              <button
+                type="button"
+                onClick={() => handleResetLineOffset(selectedSub.id)}
+                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-amber-400 transition"
+              >
+                شروع همزمان (0.00s)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleNudgeOffset(selectedSub.id, 0.1)}
+                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 transition font-mono"
+              >
+                +۰.۱ ثانیه
+              </button>
+              <button
+                type="button"
+                onClick={() => handleNudgeOffset(selectedSub.id, 0.5)}
+                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 transition font-mono"
+              >
+                +۰.۵ ثانیه
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Playback Controls & Sliders */}
       <div className="flex flex-col md:flex-row items-center justify-between gap-6 p-4 bg-slate-950/60 rounded-2xl border border-slate-800">

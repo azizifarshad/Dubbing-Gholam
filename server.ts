@@ -848,52 +848,116 @@ app.post('/api/translate-subtitles', async (req: Request, res: Response) => {
 
     const selectedStyle = styleInstructions[style] || styleInstructions.colloquial;
 
-    // Clean lines - without any word-count restrictions so translation is rich, natural, and crystal clear
-    const simpleLines = lines.map((l: any) => ({
-      id: l.id,
-      text: (l.text || '').trim(),
-    }));
+    // Format lines with word counts and 120% max budget without cutting off clauses
+    const simpleLines = lines.map((l: any) => {
+      const start = typeof l.start === 'number' ? l.start : 0;
+      const end = typeof l.end === 'number' ? l.end : 0;
+      const duration = typeof l.duration === 'number' ? l.duration : (end > start ? end - start : 2.5);
+      const enWords = (l.text || '').trim().split(/\s+/).filter(Boolean).length;
+      // Word count budget: Persian must not exceed 120% of English words.
+      // NEVER truncate or omit parts of the sentence to meet the limit!
+      const maxBudgetWords = Math.max(enWords + 2, Math.ceil(enWords * 1.2));
+      return {
+        id: l.id,
+        text: (l.text || '').trim(),
+        start,
+        end,
+        duration: Number(duration.toFixed(1)),
+        englishWordCount: enWords,
+        maxBudgetWords,
+      };
+    });
 
-    const buildPromptForLines = (subsetLines: Array<{ id: number; text: string }>) => `شما یک مدیر دوبلاژ و مترجم ارشد فیلم، سریال و ویدیوهای آموزشی تخصصی به زبان فارسی هستید.
-وظیفه شما ترجمه کاملاً واضح، رسا، دقیق، خوش‌آهنگ، قابل فهم و غنی خطوط زیرنویس انگلیسی زیر به زبان فارسی محاوره‌ای برای دوبله است.
+    const buildPromptForLines = (subsetLines: Array<any>) => `You are a professional English-to-Persian translator specializing in programming, computer science, software development, AI, and educational content.
 
-قوانین حیاتی ترجمه:
-۱. روانی، وضوح و انتقال کامل معنا (Meaning & Clarity First):
-معنا و مفهوم هر دیالوگ باید کاملاً شفاف، روان، رسا و بدون هیچ‌گونه ابهام منتقل شود. به هیچ عنوان کلمات یا معانی ضروری را حذف یا فدا نکنید. مخاطب فارسی‌زبان باید دقیقاً منظور گوینده را متوجه شود.
+Your task is to translate English text into natural, concise, conversational Persian that sounds like a native Persian-speaking instructor explaining a topic, not someone reading from a textbook.
 
-۲. حذف کامل محدودیت تعداد کلمات (No Word Count Restrictions):
-هیچ‌گونه محدودیتی بر روی تعداد کلمات اعمال نکنید. نیازی به کوتاه کردن اجباری یا آسیب زدن به بار معنایی جمله نیست. اجازه دهید هر دیالوگ با جمله‌بندی کامل، طبیعی و روان دوبله فارسی بیان شود.
+### 1. Natural, Conversational Persian (Instructor Style - مدرس ایرانی)
+- Use simple, modern, fluent, conversational Persian.
+- Make the translation sound natural when spoken aloud in educational videos and voiceovers (e.g. use spoken conversational forms: "توی این درس می‌خوایم...", "سلام مو هستم خوش اومدید", "قراره بررسی کنیم", "می‌ریم سراغ...").
+- Avoid overly formal, literary, bookish, or unnatural phrasing (do NOT write stiff literal text like "دوباره مو هستم" or "ما قصد داریم").
+- Preserve the original meaning while restructuring sentences when necessary to make them sound natural in Persian.
+- Prefer everyday spoken expressions over formal equivalents whenever appropriate.
 
-۳. لحن محاوره‌ای صمیمی دوبلاژ (Colloquial Persian Tone):
-ترجمه باید با لحن گفتاری و صمیمی روزمره (دقیقاً مانند دوبله فارسی حرفه‌ای فیلم‌ها و ویدیوهای آموزشی) باشد. از افعال و کلمات شکسته و گفتاری استفاده کنید (مانند: می‌ریم، ببین، قراره، انجام بدیم، چیه، اینه، می‌خوایم، بیا، بریم سراغش). از جملات خشک، رسمی و کتابی اکیداً پرهیز کنید.
+### 2. Strict Word Count, Conciseness & Completeness (DO NOT DROP CLAUSES)
+- Use the fewest words possible while preserving the complete meaning.
+- CRITICAL: Never cut off, omit, or delete parts of the sentence! If an English sentence has multiple clauses or ideas, ALL clauses must be translated and conveyed clearly.
+- Avoid unnecessary explanations, filler words, redundant phrases, and repetitions.
+- The Persian translation must NOT contain more than 120% of the words of the original English text (e.g., if English is 10 words, Persian should be around 8 to 12 words max).
+- Treat this budget as a guideline for conciseness: before returning the translation, check the word count.
+- Whenever two translations are equally accurate, choose the shorter, punchier one.
+- Never remove important technical details, conditions, examples, warnings, or logical relationships just to meet the word limit. Instead, rewrite the sentence more concisely.
+- Prioritize semantic accuracy and completeness while remaining as concise as possible.
 
-۴. حفظ دقیق اصطلاحات تخصصی کامپیوتر و برنامه‌نویسی (Technical IT Terms):
-اصطلاحات تخصصی حوزه کامپیوتر، برنامه‌نویسی، هوش مصنوعی و نرم‌افزار را به هیچ وجه ترجمه لغوی نکنید! عین کلمه یا تلفظ رایج آن در جامعه برنامه‌نویسان را بنویسید:
-- "magic method" یا "dunder method": اکیداً نباید «متد جادویی» ترجمه شود! بنویسید «مجیک متد» یا «داندر متد».
-- method: بنویسید «متد» (اکیداً نه روش یا اسلوب!)
-- class: بنویسید «کلاس»
-- function: بنویسید «فانکشن» یا «تابع»
-- object: بنویسید «آبجکت» (اکیداً نه شیء!)
-- instance: بنویسید «اینستنس»
-- constructor: بنویسید «کانستراکتور»
-- loop: بنویسید «لوپ» یا «حلقه»
-- array / string: بنویسید «آرایه» و «استرینگ»
-- bug / debug: بنویسید «باگ» و «دیباگ»
-- framework / library / package: بنویسید «فریم‌ورک»، «لایبرری»، «پکیج»
-- API / endpoint: بنویسید «ای‌پی‌آی»، «اندپوینت»
-- backend / frontend / fullstack: بنویسید «بک‌اند»، «فرانت‌اند»، «فول‌استک»
-- compiler / runtime / code / script: بنویسید «کامپایلر»، «ران‌تایم»، «کد»، «اسکریپت»
-- terminal / console / query / database: بنویسید «ترمینال»، «کنسول»، «کوئری»، «دیتابیس»
-- cache / cookie / server / client: بنویسید «کش»، «کوکی»، «سرور»، «کلاینت»
-- git / commit / push / pull / merge: بنویسید «گیت»، «کامیت»، «پوش»، «پول»، «مرج»
-- hook / component / props / state: بنویسید «هوک»، «کامپوننت»، «پراپس»، «استیت»
-- async / await / promise / thread: بنویسید «ای‌سینک»، «اوِیت»، «پرامیس»، «ترد»
+### 3. Preserve Technical Terminology in English
+- Keep established technical terms from computer science, programming, AI, networking, software engineering, and web development in their original English form.
+- Do NOT translate technical terminology into Persian just to make it sound more localized.
+- Examples:
+  - Magic Method → Magic Method (NOT "متد جادویی")
+  - Class → Class
+  - Object → Object
+  - Function → Function
+  - Framework → Framework
+  - API / Endpoint → API / Endpoint
+  - Debugging → Debugging
+  - Runtime → Runtime
+  - Callback → Callback
+  - Middleware → Middleware
+  - Machine Learning → Machine Learning
+  - Neural Network → Neural Network
+  - Token → Token
+  - Prompt → Prompt
+  - Method / Constructor → Method / Constructor
+  - Array / String / Loop → Array / String / Loop
+  - Database / Query → Database / Query
+  - Frontend / Backend / Fullstack → Frontend / Backend / Fullstack
+  - VMware Player / Docker / Linux / VS Code → VMware Player / Docker / Linux / VS Code
+- Preserve the exact spelling and capitalization of software tools, class names, function names, and code identifiers.
+- Do not translate an entire sentence into English. Keep the surrounding explanation in natural Persian while retaining technical terms in English.
 
-۵. سبک انتخابی: ${selectedStyle}
-${context ? `زمینه فیلم یا ویدیو: ${context}` : ''}
+### 4. Semantic Accuracy & Completeness
+- Preserve the original meaning, intent, technical accuracy, and logical relationships.
+- Do not add explanations or assumptions that the original speaker did not provide.
+- Do not omit important details, examples, conditions, warnings, or second clauses.
+- Preserve names, numbers, values, code, and technical references accurately.
 
-خطوط برای ترجمه:
-${JSON.stringify(subsetLines, null, 2)}
+### 5. Voiceover and Subtitle Optimization
+- Write short, easy-to-speak sentences suitable for voiceover and dubbing.
+- Avoid awkward phrasing, unnecessarily complex sentence structures, and difficult-to-pronounce constructions.
+- Keep the translation reasonably close to the original sentence length and speaking rhythm.
+
+### 6. Golden Examples (Follow these patterns strictly):
+Example 1:
+English: "downloading and installing the VMware Player. Now, this is one of our first choice"
+WRONG (Dropped the second clause): "دانلود و نصب VMware Player." ❌ (Missing critical meaning!)
+CORRECT (Conversational & Complete): "دانلود و نصب VMware Player؛ این یکی از انتخاب‌های اصلی ماست." ✅
+
+Example 2:
+English: "Hey, everybody, welcome back. It's Mo again. Well, this lecture what we're going to be doing is"
+WRONG (Stiff & chopped off): "سلام، خوش اومدید، دوباره مو هستم." ❌
+CORRECT (Natural Instructor Style): "سلام مو هستم خوش اومدید، توی این درس می‌خوایم..." ✅
+
+Example 3:
+English: "In this function we handle the callback and catch any runtime error."
+CORRECT: "توی این Function، کال‌بک (Callback) رو هندل می‌کنیم و جلوی Runtime Error رو می‌گیریم." ✅
+
+### 7. Output Rules
+- Provide the translation for each subtitle line matching its exact ID in the JSON response.
+- Do not include introductions, headings, explanations, analysis, or notes.
+- Keep technical terms in English within the Persian translation.
+
+Lines to translate:
+${JSON.stringify(
+  subsetLines.map((s) => ({
+    id: s.id,
+    englishText: s.text,
+    durationSeconds: s.duration,
+    englishWordCount: s.englishWordCount,
+    maxPersianWordsAllowed: s.maxBudgetWords,
+  })),
+  null,
+  2
+)}
 `;
 
     const translationSchema = {

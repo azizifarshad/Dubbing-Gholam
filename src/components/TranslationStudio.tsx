@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { SubtitleItem, TRANSLATION_STYLES, TranslationStyle, AVAILABLE_VOICES, GeminiVoiceId } from '../types/dubbing';
-import { Languages, Wand2, RefreshCw, CheckCircle2, Clock, Sparkles, User, AlertCircle, Loader2, Cpu, Globe, Server } from 'lucide-react';
+import { Languages, Wand2, RefreshCw, CheckCircle2, Clock, Sparkles, User, AlertCircle, Loader2, Cpu, Globe, Server, FileText, Copy, Check } from 'lucide-react';
 import { translateOfflineLocally } from '../utils/localTranslator';
 
 interface TranslationStudioProps {
@@ -26,6 +26,8 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
   const [translatingLineId, setTranslatingLineId] = useState<number | null>(null);
   const [translationError, setTranslationError] = useState<string | null>(null);
   const [globalVoice, setGlobalVoice] = useState<GeminiVoiceId>('Iapetus');
+  const [showPromptModal, setShowPromptModal] = useState(false);
+  const [copiedPrompt, setCopiedPrompt] = useState(false);
 
   const translatedCount = subtitles.filter((s) => s.farsiText.trim().length > 0).length;
   const isAllTranslated = subtitles.length > 0 && translatedCount === subtitles.length;
@@ -441,6 +443,38 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
         </div>
       </div>
 
+      {/* Master Translation Rules & Prompt Inspector */}
+      <div className="mb-6 p-4 rounded-2xl bg-slate-950/80 border border-amber-500/30 text-xs flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-md">
+        <div className="flex items-start gap-2.5">
+          <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <div>
+            <div className="font-bold text-slate-200 flex flex-wrap items-center gap-2">
+              <span>قوانین طلایی ترجمه و پرامپت استودیو:</span>
+              <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 text-[10px] font-mono border border-emerald-500/30">
+                مدرس ایرانی محاوره‌ای • عدم حذف مفاهیم • حفظ اصطلاحات فنی
+              </span>
+            </div>
+            <div className="text-slate-400 text-[11px] mt-1 leading-relaxed">
+              • <strong className="text-slate-300">لحن محاوره‌ای مدرس ایرانی:</strong> استفاده از عبارات روان و صمیمی («توی این درس می‌خوایم...»، «سلام مو هستم خوش اومدید») به جای ترجمه کتابی و خشک.<br />
+              • <strong className="text-slate-300">حفظ کامل مفاهیم:</strong> هیچ بخش از جمله (مثل بخش دوم جملات) حذف نمی‌شود.<br />
+              • <strong className="text-slate-300">سقف کلمات دوبله:</strong> تعداد کلمات فارسی حداکثر تا ۱۲۰٪ کلمات انگلیسی است تا صداها روی هم نیفتند.<br />
+              • <strong className="text-slate-300">حفظ اصطلاحات تخصصی به انگلیسی:</strong> ابزارها و کلمات مانند VMware Player, Class, Function, Magic Method, API عیناً انگلیسی می‌مانند.
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowPromptModal(true)}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition text-[11px] font-medium"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>مشاهده پرامپت ارسالی به هوش مصنوعی</span>
+          </button>
+        </div>
+      </div>
+
 
       {translationError && (
         <div className="mb-6 p-4 rounded-2xl bg-amber-950/40 border border-amber-500/50 text-amber-200 text-xs shadow-lg">
@@ -479,6 +513,11 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
         {subtitles.map((sub, idx) => {
           const duration = (sub.end - sub.start).toFixed(1);
           const isCurrentTranslating = translatingLineId === sub.id;
+          const enWords = sub.originalText.trim().split(/\s+/).filter(Boolean).length;
+          const faWords = sub.farsiText.trim().split(/\s+/).filter(Boolean).length;
+          const maxAllowedWords = Math.max(2, Math.min(enWords, Math.round(parseFloat(duration) * 2.0)));
+          const isExceedingBudget = faWords > maxAllowedWords && faWords > 0;
+          const wordRatio = enWords > 0 ? Math.round((faWords / enWords) * 100) : 100;
 
           return (
             <div
@@ -537,15 +576,20 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
                 </div>
               </div>
 
-              {/* Source (English) and Target (Farsi Dubbing Dialogue) - Complete Semantic Freedom Without Word Restrictions */}
+              {/* Source (English) and Target (Farsi Dubbing Dialogue) with Dubbing Word Budget */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {/* English Source */}
                 <div className="bg-slate-900/60 rounded-xl p-3 border border-slate-800/80">
                   <div className="text-[11px] font-semibold text-slate-400 mb-1 flex items-center justify-between">
                     <span>زیرنویس انگلیسی اصلی:</span>
-                    <span className="text-[10px] text-slate-400 font-mono bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-                      {duration} ثانیه
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-slate-400 font-mono bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                        {enWords} کلمه
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-mono bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                        {duration} ثانیه
+                      </span>
+                    </div>
                   </div>
                   <div dir="ltr" className="text-xs text-slate-300 font-sans leading-relaxed">
                     {sub.originalText}
@@ -553,10 +597,34 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
                 </div>
 
                 {/* Farsi Dubbing Dialogue (Editable) */}
-                <div className="bg-amber-500/5 rounded-xl p-3 border border-amber-500/20">
-                  <div className="text-[11px] font-semibold text-amber-400 mb-1 flex items-center justify-between">
+                <div className={`rounded-xl p-3 border transition-all ${
+                  isExceedingBudget
+                    ? 'bg-rose-950/20 border-rose-500/40'
+                    : 'bg-amber-500/5 border-amber-500/20'
+                }`}>
+                  <div className="text-[11px] font-semibold text-amber-400 mb-1 flex items-center justify-between flex-wrap gap-1">
                     <span>دیالوگ دوبله فارسی:</span>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {faWords > 0 && (
+                        <span
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                            isExceedingBudget
+                              ? 'bg-rose-950/70 border-rose-500/50 text-rose-300'
+                              : 'bg-emerald-950/60 border-emerald-500/30 text-emerald-300'
+                          }`}
+                          title={
+                            isExceedingBudget
+                              ? `تعداد کلمات (${faWords}) از سقف ۱۲۰٪ (${maxAllowedWords} کلمه) بیشتر است. ممکن است صدا روی جمله بعدی بیفتد.`
+                              : `تعداد کلمات منطبق با زمان صحنه است (نسبت: ${wordRatio}٪)`
+                          }
+                        >
+                          {isExceedingBudget ? (
+                            <span>⚠️ {faWords} کلمه ({wordRatio}٪ - سقف: {maxAllowedWords})</span>
+                          ) : (
+                            <span>✅ {faWords} کلمه ({wordRatio}٪ - منطبق)</span>
+                          )}
+                        </span>
+                      )}
                       {sub.emotion && (
                         <span className="text-[10px] text-slate-400 bg-slate-900 px-2 py-0.5 rounded-md border border-slate-800">
                           {sub.emotion}
@@ -602,6 +670,134 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
             <Sparkles className="w-4 h-4" />
             <span>مرحله بعد: تولید صوت گویندگان دوبله &larr;</span>
           </button>
+        </div>
+      )}
+
+      {/* Prompt Inspector Modal */}
+      {showPromptModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+              <div className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-amber-400" />
+                <h3 className="font-bold text-slate-200 text-sm">پرامپت اختصاصی سیستم برای ترجمه و دوبلاژ</h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const fullPromptText = `You are a professional English-to-Persian translator specializing in programming, computer science, software development, AI, and educational content.
+
+Your task is to translate English text into natural, concise, conversational Persian that sounds like a native Persian-speaking instructor explaining a topic, not someone reading from a textbook.
+
+### 1. Natural, Conversational Persian (Instructor Style - مدرس ایرانی)
+- Use simple, modern, fluent, conversational Persian.
+- Make the translation sound natural when spoken aloud in educational videos and voiceovers (e.g. use spoken conversational forms: "توی این درس می‌خوایم...", "سلام مو هستم خوش اومدید", "قراره بررسی کنیم", "می‌ریم سراغ...").
+- Avoid overly formal, literary, bookish, or unnatural phrasing (do NOT write stiff literal text like "دوباره مو هستم" or "ما قصد داریم").
+- Preserve the original meaning while restructuring sentences when necessary to make them sound natural in Persian.
+- Prefer everyday spoken expressions over formal equivalents whenever appropriate.
+
+### 2. Strict Word Count, Conciseness & Completeness (DO NOT DROP CLAUSES)
+- Use the fewest words possible while preserving the complete meaning.
+- CRITICAL: Never cut off, omit, or delete parts of the sentence! If an English sentence has multiple clauses or ideas, ALL clauses must be translated and conveyed clearly.
+- Avoid unnecessary explanations, filler words, redundant phrases, and repetitions.
+- The Persian translation must NOT contain more than 120% of the words of the original English text (e.g., if English is 10 words, Persian should be around 8 to 12 words max).
+- Whenever two translations are equally accurate, choose the shorter, punchier one.
+- Never remove important technical details, conditions, examples, warnings, or logical relationships just to meet the word limit.
+- Prioritize semantic accuracy and completeness while remaining as concise as possible.
+
+### 3. Preserve Technical Terminology in English
+- Keep established technical terms from computer science, programming, AI, networking, software engineering, and web development in their original English form.
+- Do NOT translate technical terminology into Persian just to make it sound more localized.
+- Examples: Magic Method, Class, Object, Function, Framework, API, Debugging, Runtime, Callback, Middleware, Machine Learning, Token, Prompt, VMware Player, Docker.
+
+### 4. Semantic Accuracy & Completeness
+- Preserve the original meaning, intent, technical accuracy, and logical relationships.
+- Do not omit important details, examples, conditions, warnings, or second clauses.
+
+### 5. Golden Examples (Follow these patterns strictly):
+Example 1:
+English: "downloading and installing the VMware Player. Now, this is one of our first choice"
+CORRECT: "دانلود و نصب VMware Player؛ این یکی از انتخاب‌های اصلی ماست." ✅
+
+Example 2:
+English: "Hey, everybody, welcome back. It's Mo again. Well, this lecture what we're going to be doing is"
+CORRECT: "سلام مو هستم خوش اومدید، توی این درس می‌خوایم..." ✅`;
+                    navigator.clipboard.writeText(fullPromptText);
+                    setCopiedPrompt(true);
+                    setTimeout(() => setCopiedPrompt(false), 2000);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs transition"
+                >
+                  {copiedPrompt ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-emerald-400">کپی شد!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>کپی پرامپت</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPromptModal(false)}
+                  className="text-slate-400 hover:text-slate-200 p-1 rounded-lg hover:bg-slate-800 text-sm"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4 text-xs font-mono leading-relaxed bg-slate-950/80 text-slate-300">
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 font-sans text-xs">
+                این دقیقاً همان پرامپتی است که به مدل‌های Gemini در سرور ارسال می‌شود تا ترجمه مثل مدرس ایرانی صمیمی، کامل (بدون ناقص ماندن جملات)، با حفظ واژگان انگلیسی و با سقف تعداد کلمات انجام گیرد.
+              </div>
+
+              <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl whitespace-pre-wrap select-all font-mono text-[11px] text-slate-300">
+{`You are a professional English-to-Persian translator specializing in programming, computer science, software development, AI, and educational content.
+
+Your task is to translate English text into natural, concise, conversational Persian that sounds like a native Persian-speaking instructor explaining a topic, not someone reading from a textbook.
+
+### 1. Natural, Conversational Persian (Instructor Style - مدرس ایرانی)
+- Use simple, modern, fluent, conversational Persian.
+- Make the translation sound natural when spoken aloud in educational videos and voiceovers (e.g. use spoken conversational forms: "توی این درس می‌خوایم...", "سلام مو هستم خوش اومدید", "قراره بررسی کنیم").
+- Avoid overly formal, literary, bookish, or unnatural phrasing (do NOT write stiff literal text like "دوباره مو هستم").
+- Preserve the original meaning while restructuring sentences when necessary to make them sound natural in Persian.
+
+### 2. Strict Word Count, Conciseness & Completeness (DO NOT DROP CLAUSES)
+- Use the fewest words possible while preserving the complete meaning.
+- CRITICAL: Never cut off, omit, or delete parts of the sentence! If an English sentence has multiple clauses or ideas, ALL clauses must be translated and conveyed clearly.
+- The Persian translation must NOT contain more than 120% of the words of the original English text.
+- Never remove important technical details, conditions, examples, warnings, or logical relationships just to meet the word limit.
+- Prioritize semantic accuracy and completeness while remaining as concise as possible.
+
+### 3. Preserve Technical Terminology in English
+- Keep established technical terms in their original English form (VMware Player, Magic Method, Class, Object, Function, API, Debugging, Runtime, etc.).
+
+### 4. Golden Examples:
+Example 1:
+English: "downloading and installing the VMware Player. Now, this is one of our first choice"
+CORRECT: "دانلود و نصب VMware Player؛ این یکی از انتخاب‌های اصلی ماست." ✅
+
+Example 2:
+English: "Hey, everybody, welcome back. It's Mo again. Well, this lecture what we're going to be doing is"
+CORRECT: "سلام مو هستم خوش اومدید، توی این درس می‌خوایم..." ✅`}
+              </div>
+            </div>
+
+            <div className="px-5 py-3 border-t border-slate-800 bg-slate-950/60 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowPromptModal(false)}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs"
+              >
+                بستن
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

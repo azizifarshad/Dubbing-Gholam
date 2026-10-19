@@ -280,6 +280,8 @@ export default function App() {
           <div className={activeStep === 4 || viewMode === 'all' ? 'block' : 'hidden'}>
             <TimelinePlayer
               subtitles={subtitles}
+              onUpdateSubtitle={handleUpdateSubtitle}
+              onUpdateAllSubtitles={handleUpdateAllSubtitles}
               originalAudioBuffer={originalAudioBuffer}
               originalAudioName={originalAudioName}
               subtitleFileName={subtitleFileName}

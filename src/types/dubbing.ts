@@ -13,6 +13,7 @@ export interface SubtitleItem {
   audioBase64?: string;
   audioBlobUrl?: string;
   audioDuration?: number;
+  audioOffset?: number; // Offset shift in seconds (e.g. +0.2s or -0.15s) relative to subtitle start
   status: 'idle' | 'translating' | 'translated' | 'generating' | 'ready' | 'error';
   error?: string;
 }

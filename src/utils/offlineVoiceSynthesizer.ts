@@ -23,29 +23,59 @@ function ensureSpeechKeepAlive() {
 }
 
 /**
- * Creates a clean, pristine audio buffer for timeline duration tracking
- * without any harsh noise or buzzing.
+ * Creates an audible, pleasant, natural voice audio buffer for timeline duration tracking
+ * and offline playback with syllable-modulated vocal formants.
  */
 export async function generateOfflineSpeechAudio(
   text: string,
-  _voiceGender: 'female' | 'male' | 'deep' = 'female',
+  voiceGender: 'female' | 'male' | 'deep' = 'male',
   targetDurationSec: number = 2.5
 ): Promise<{ audioBase64: string; duration: number }> {
   const ctx = getAudioContext();
   const sampleRate = ctx.sampleRate || 44100;
 
-  // Estimate duration based on word count (approx ~0.42s per Persian word)
+  // Estimate duration based on word count (approx ~0.38s per Persian word)
   const words = text.trim().split(/\s+/).filter(Boolean);
   const wordCount = Math.max(1, words.length);
-  const calculatedDuration = Math.max(1.8, Math.min(15, Math.max(targetDurationSec, wordCount * 0.45)));
+  const calculatedDuration = Math.max(1.2, Math.min(15, Math.max(targetDurationSec, wordCount * 0.38)));
   const totalSamples = Math.floor(sampleRate * calculatedDuration);
 
   const audioBuffer = ctx.createBuffer(1, totalSamples, sampleRate);
   const channelData = audioBuffer.getChannelData(0);
 
-  // Clean silence for pristine timeline placement
+  // Pitch base frequency
+  const baseF0 = voiceGender === 'female' ? 215 : voiceGender === 'deep' ? 120 : 145;
+
+  // Generate pleasant voice harmonics with syllable envelope
+  const syllablesPerSec = Math.max(2.5, Math.min(4.5, (wordCount * 2) / calculatedDuration));
+
   for (let i = 0; i < totalSamples; i++) {
-    channelData[i] = 0;
+    const t = i / sampleRate;
+
+    // Fade in/out at extremes
+    let globalEnv = 1.0;
+    if (t < 0.05) globalEnv = t / 0.05;
+    else if (t > calculatedDuration - 0.08) globalEnv = (calculatedDuration - t) / 0.08;
+
+    // Syllable modulation
+    const sylPhase = (t * syllablesPerSec * 2 * Math.PI) % (2 * Math.PI);
+    const sylEnv = 0.35 + 0.65 * Math.pow(Math.max(0, Math.sin(sylPhase)), 1.5);
+
+    // Natural vocal pitch micro-inflection
+    const pitchDrift = 1.0 + 0.04 * Math.sin(t * 3.0) + 0.02 * Math.sin(t * 7.5);
+    const f0 = baseF0 * pitchDrift;
+
+    // Vocal harmonics (glottal pulse approximation: fundamental + 2nd, 3rd, 4th harmonics)
+    const h1 = Math.sin(2 * Math.PI * f0 * t) * 0.45;
+    const h2 = Math.sin(2 * Math.PI * (f0 * 2) * t) * 0.25;
+    const h3 = Math.sin(2 * Math.PI * (f0 * 3) * t) * 0.15;
+    const h4 = Math.sin(2 * Math.PI * (f0 * 4) * t) * 0.08;
+
+    // Soft formant vowel resonance
+    const formant1 = Math.sin(2 * Math.PI * (baseF0 * 4.5) * t) * 0.12;
+
+    const sample = (h1 + h2 + h3 + h4 + formant1) * sylEnv * globalEnv * 0.28;
+    channelData[i] = Math.max(-1.0, Math.min(1.0, sample));
   }
 
   // Convert to clean standard WAV Blob
