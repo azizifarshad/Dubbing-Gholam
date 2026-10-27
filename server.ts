@@ -291,11 +291,178 @@ app.post(
         throw new Error('فایل صوتی استخراج شده تولید نشد.');
       }
 
+      const config = getApiConfig(req);
+
+      // If using Hormouz AI or OpenAI-compatible gateway:
+      if (config.isHormouzOrOpenAI) {
+        let whisperResult: any = null;
+        try {
+          console.log(`[Hormouz STT] Attempting audio transcription with whisper-1 via ${config.baseUrl}/audio/transcriptions...`);
+          const audioBuf = await fs.promises.readFile(tempAudioMp3);
+          const formData = new FormData();
+          formData.append('file', new Blob([audioBuf], { type: 'audio/mp3' }), 'speech.mp3');
+          formData.append('model', 'whisper-1');
+          formData.append('response_format', 'verbose_json');
+
+          const sttRes = await fetch(`${config.baseUrl}/audio/transcriptions`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${config.apiKey}`,
+            },
+            body: formData,
+            signal: AbortSignal.timeout(90000),
+          });
+
+          if (sttRes.ok) {
+            whisperResult = await sttRes.json();
+          } else {
+            const errText = await sttRes.text();
+            console.warn('[Hormouz STT Warning]:', errText);
+          }
+        } catch (sttErr: any) {
+          console.warn('[Hormouz STT Error]:', sttErr?.message);
+        }
+
+        if (whisperResult && Array.isArray(whisperResult.segments) && whisperResult.segments.length > 0) {
+          const formattedSubs = whisperResult.segments.map((seg: any, idx: number) => ({
+            id: idx + 1,
+            startSeconds: seg.start,
+            endSeconds: seg.end,
+            startTime: formatSrtTimestamp(seg.start),
+            endTime: formatSrtTimestamp(seg.end),
+            text: (seg.text || '').trim(),
+          }));
+
+          let generatedSrt = '';
+          formattedSubs.forEach((item: any) => {
+            generatedSrt += `${item.id}\n${item.startTime} --> ${item.endTime}\n${item.text}\n\n`;
+          });
+
+          return res.json({
+            success: true,
+            subtitles: formattedSubs,
+            srtText: generatedSrt.trim(),
+            count: formattedSubs.length,
+          });
+        }
+
+        // Fallback directly to Local Whisper (100% free and offline on user machine)
+        console.log('[Local Whisper] Transcribing speech locally with Whisper AI on user PC...');
+        try {
+          const localSegments = await new Promise<any[]>((resolve, reject) => {
+            const pyProc = spawn('python', ['local_whisper.py', tempAudioMp3, 'base']);
+            let stdout = '';
+            let stderr = '';
+            pyProc.stdout.on('data', (d) => { stdout += d.toString(); });
+            pyProc.stderr.on('data', (d) => { stderr += d.toString(); });
+            pyProc.on('close', (code) => {
+              try {
+                const resJson = JSON.parse(stdout.trim());
+                if (resJson.success && Array.isArray(resJson.segments)) {
+                  resolve(resJson.segments);
+                } else {
+                  reject(new Error(resJson.error || stderr || `Whisper exit code ${code}`));
+                }
+              } catch (err: any) {
+                reject(new Error(`خطا در استخراج با Whisper محلی: ${stdout || stderr}`));
+              }
+            });
+            pyProc.on('error', (err) => reject(new Error(`عدم امکان اجرای پایتون برای Whisper: ${err.message}`)));
+          });
+
+          if (localSegments.length > 0) {
+            const formattedSubs = localSegments.map((seg: any, idx: number) => ({
+              id: idx + 1,
+              startSeconds: seg.start,
+              endSeconds: seg.end,
+              startTime: formatSrtTimestamp(seg.start),
+              endTime: formatSrtTimestamp(seg.end),
+              text: (seg.text || '').trim(),
+            }));
+
+            let generatedSrt = '';
+            formattedSubs.forEach((item: any) => {
+              generatedSrt += `${item.id}\n${item.startTime} --> ${item.endTime}\n${item.text}\n\n`;
+            });
+
+            return res.json({
+              success: true,
+              subtitles: formattedSubs,
+              srtText: generatedSrt.trim(),
+              count: formattedSubs.length,
+              engine: 'local-whisper',
+            });
+          }
+        } catch (localErr: any) {
+          console.warn('[Local Whisper Error]:', localErr.message);
+          return res.status(500).json({
+            success: false,
+            error: `خطا در تبدیل گفتار ویدیو با Whisper محلی: ${localErr.message}`,
+          });
+        }
+      }
+
+      // If no cloud STT configured, run local Whisper directly
+      if (!config.isGeminiDirect) {
+        console.log('[Local Whisper] Running 100% free offline Whisper transcription...');
+        try {
+          const localSegments = await new Promise<any[]>((resolve, reject) => {
+            const pyProc = spawn('python', ['local_whisper.py', tempAudioMp3, 'base']);
+            let stdout = '';
+            let stderr = '';
+            pyProc.stdout.on('data', (d) => { stdout += d.toString(); });
+            pyProc.stderr.on('data', (d) => { stderr += d.toString(); });
+            pyProc.on('close', (code) => {
+              try {
+                const resJson = JSON.parse(stdout.trim());
+                if (resJson.success && Array.isArray(resJson.segments)) {
+                  resolve(resJson.segments);
+                } else {
+                  reject(new Error(resJson.error || stderr || `Whisper exit code ${code}`));
+                }
+              } catch (err: any) {
+                reject(new Error(`خطا در استخراج با Whisper محلی: ${stdout || stderr}`));
+              }
+            });
+            pyProc.on('error', (err) => reject(new Error(`عدم امکان اجرای پایتون: ${err.message}`)));
+          });
+
+          if (localSegments.length > 0) {
+            const formattedSubs = localSegments.map((seg: any, idx: number) => ({
+              id: idx + 1,
+              startSeconds: seg.start,
+              endSeconds: seg.end,
+              startTime: formatSrtTimestamp(seg.start),
+              endTime: formatSrtTimestamp(seg.end),
+              text: (seg.text || '').trim(),
+            }));
+
+            let generatedSrt = '';
+            formattedSubs.forEach((item: any) => {
+              generatedSrt += `${item.id}\n${item.startTime} --> ${item.endTime}\n${item.text}\n\n`;
+            });
+
+            return res.json({
+              success: true,
+              subtitles: formattedSubs,
+              srtText: generatedSrt.trim(),
+              count: formattedSubs.length,
+              engine: 'local-whisper',
+            });
+          }
+        } catch (localErr: any) {
+          return res.status(500).json({
+            success: false,
+            error: `خطا در پردازش با Whisper محلی: ${localErr.message}`,
+          });
+        }
+      }
+
       const audioBuffer = await fs.promises.readFile(tempAudioMp3);
       const audioBase64 = audioBuffer.toString('base64');
 
       // 2. Transcribe speech using Gemini Multimodal Audio Model
-      const ai = getGenAIClient(customKey);
+      const ai = getGenAIClient(config.apiKey);
 
       const promptText = `You are a world-class speech-to-text and subtitle synchronization engine (equivalent to Whisper Large-v3 with high-resolution alignment).
 Listen to the English spoken audio carefully.
