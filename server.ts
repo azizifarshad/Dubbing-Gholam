@@ -677,6 +677,33 @@ async function translateWithHormouz(
   return allTranslations;
 }
 
+// Helper to convert raw 16-bit PCM buffer to a standard WAV audio buffer with RIFF header
+function pcmToWav(pcmBuffer: Buffer, sampleRate: number = 24000, numChannels: number = 1): Buffer {
+  if (pcmBuffer.length >= 4 && pcmBuffer.subarray(0, 4).toString('ascii') === 'RIFF') {
+    return pcmBuffer;
+  }
+  const header = Buffer.alloc(44);
+  const dataSize = pcmBuffer.length;
+  const byteRate = sampleRate * numChannels * 2;
+  const blockAlign = numChannels * 2;
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
+  header.writeUInt16LE(1, 20);  // AudioFormat (1 = PCM)
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34); // BitsPerSample
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
 // Hormouz AI (or OpenAI-compatible) Speech / TTS runner
 async function ttsWithHormouz(
   text: string,
@@ -685,7 +712,13 @@ async function ttsWithHormouz(
 ): Promise<{ audioBase64: string; mimeType: string }> {
   console.log(`[Hormouz TTS] Generating voice with model "${config.ttsModel}" and voice "${voice}" at ${config.baseUrl}...`);
 
-  const res = await fetch(`${config.baseUrl}/audio/speech`, {
+  // Hormouz requires response_format="pcm" for Gemini TTS models
+  const isGeminiOrHormouz = config.ttsModel.toLowerCase().includes('gemini') || config.baseUrl.includes('hormouz');
+  let responseFormat = isGeminiOrHormouz ? 'pcm' : 'mp3';
+
+  console.log(`[Hormouz TTS] Generating voice with model "${config.ttsModel}" (format: ${responseFormat}, voice: ${voice}) at ${config.baseUrl}...`);
+
+  let res = await fetch(`${config.baseUrl}/audio/speech`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -695,7 +728,7 @@ async function ttsWithHormouz(
       model: config.ttsModel,
       input: text.trim(),
       voice: voice || 'Puck',
-      response_format: 'mp3',
+      response_format: responseFormat,
     }),
     signal: AbortSignal.timeout(45000),
   });
@@ -705,7 +738,36 @@ async function ttsWithHormouz(
     let parsedErr: any;
     try { parsedErr = JSON.parse(errText); } catch {}
     const msg = parsedErr?.error?.message || parsedErr?.message || errText;
-    throw new Error(`خطای سرویس صوتی هرمز (${res.status}): ${msg}`);
+
+    // Auto-retry with PCM if format was rejected
+    if (msg.includes('pcm') && responseFormat !== 'pcm') {
+      console.log('[Hormouz TTS] Retrying with response_format="pcm"...');
+      responseFormat = 'pcm';
+      res = await fetch(`${config.baseUrl}/audio/speech`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: config.ttsModel,
+          input: text.trim(),
+          voice: voice || 'Puck',
+          response_format: 'pcm',
+        }),
+        signal: AbortSignal.timeout(45000),
+      });
+
+      if (!res.ok) {
+        const retryErrText = await res.text();
+        let retryParsed: any;
+        try { retryParsed = JSON.parse(retryErrText); } catch {}
+        const retryMsg = retryParsed?.error?.message || retryParsed?.message || retryErrText;
+        throw new Error(`خطای سرویس صوتی هرمز (${res.status}): ${retryMsg}`);
+      }
+    } else {
+      throw new Error(`خطای سرویس صوتی هرمز (${res.status}): ${msg}`);
+    }
   }
 
   const arrayBuffer = await res.arrayBuffer();
@@ -713,10 +775,17 @@ async function ttsWithHormouz(
     throw new Error('فایل صوتی خالی از سرویس هرمز دریافت شد.');
   }
 
-  const audioBase64 = Buffer.from(arrayBuffer).toString('base64');
+  let finalBuffer: Buffer;
+  if (responseFormat === 'pcm') {
+    finalBuffer = pcmToWav(Buffer.from(arrayBuffer), 24000, 1);
+  } else {
+    finalBuffer = Buffer.from(arrayBuffer);
+  }
+
+  const audioBase64 = finalBuffer.toString('base64');
   return {
     audioBase64,
-    mimeType: 'audio/mp3',
+    mimeType: responseFormat === 'pcm' ? 'audio/wav' : 'audio/mp3',
   };
 }
 
@@ -908,6 +977,20 @@ app.post('/api/check-key', async (req: Request, res: Response) => {
   if (config.isHormouzOrOpenAI) {
     try {
       console.log(`[Hormouz Check] Testing ${config.baseUrl}/chat/completions with model ${config.translationModel}...`);
+      
+      // Fetch allowed models for this key from Hormouz
+      let allowedModels: string[] = [];
+      try {
+        const mRes = await fetch(`${config.baseUrl}/models`, {
+          headers: { 'Authorization': `Bearer ${config.apiKey}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (mRes.ok) {
+          const mData: any = await mRes.json();
+          allowedModels = (mData?.data || []).map((m: any) => m.id).filter(Boolean);
+        }
+      } catch (_) {}
+
       const testRes = await fetch(`${config.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -928,6 +1011,7 @@ app.post('/api/check-key', async (req: Request, res: Response) => {
           isConfigured: true,
           provider: 'hormouz',
           testedModel: config.translationModel,
+          allowedModels,
           message: `اتصال به هوش مصنوعی هرمز با مدل «${config.translationModel}» با موفقیت برقرار شد!`,
         });
       } else {
@@ -935,10 +1019,17 @@ app.post('/api/check-key', async (req: Request, res: Response) => {
         let parsedErr: any;
         try { parsedErr = JSON.parse(errText); } catch {}
         const msg = parsedErr?.error?.message || parsedErr?.message || errText;
+
+        let modelsNotice = '';
+        if (allowedModels.length > 0) {
+          modelsNotice = `\nمدل‌های فعال روی این کلید: ${allowedModels.join(' ، ')}`;
+        }
+
         return res.status(testRes.status === 401 ? 401 : 400).json({
           success: false,
           hasEnvKey: hasEnv,
-          error: `خطا در اتصال به هرمز (${testRes.status}): ${msg}`,
+          allowedModels,
+          error: `پاسخ هرمز (${testRes.status}): ${msg}${modelsNotice}`,
         });
       }
     } catch (err: any) {
@@ -994,6 +1085,56 @@ app.post('/api/check-key', async (req: Request, res: Response) => {
     isDailyLimit,
     retryAfterSeconds,
     error: lastError?.message || 'خطا در ارزیابی کلید API.',
+  });
+});
+
+// Endpoint to query allowed models for the given API key from Hormouz
+app.post('/api/list-models', async (req: Request, res: Response) => {
+  const config = getApiConfig(req);
+  if (!config.hasKey) {
+    return res.status(400).json({ success: false, error: 'کلید API وارد نشده است.' });
+  }
+
+  if (config.isHormouzOrOpenAI) {
+    try {
+      const modelsRes = await fetch(`${config.baseUrl}/models`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!modelsRes.ok) {
+        const errText = await modelsRes.text();
+        let parsedErr: any;
+        try { parsedErr = JSON.parse(errText); } catch {}
+        const msg = parsedErr?.error?.message || parsedErr?.message || errText;
+        return res.status(modelsRes.status).json({
+          success: false,
+          error: `خطا در دریافت لیست مدل‌ها (${modelsRes.status}): ${msg}`,
+        });
+      }
+
+      const modelsData: any = await modelsRes.json();
+      const rawList = Array.isArray(modelsData?.data) ? modelsData.data : [];
+      const modelIds = rawList.map((m: any) => m.id || m.name || m).filter(Boolean);
+
+      return res.json({
+        success: true,
+        models: modelIds,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: `خطا در ارتباط با سرور هرمز: ${err.message}`,
+      });
+    }
+  }
+
+  return res.json({
+    success: true,
+    models: ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'],
   });
 });
 

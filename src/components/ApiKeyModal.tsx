@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Key,
   X,
@@ -11,7 +11,8 @@ import {
   Globe,
   Bot,
   Volume2,
-  Layers,
+  RefreshCw,
+  List,
 } from 'lucide-react';
 
 interface ApiKeyModalProps {
@@ -48,6 +49,38 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
+  const [allowedModels, setAllowedModels] = useState<string[]>([]);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+
+  // Auto-fetch allowed models on mount if key exists
+  useEffect(() => {
+    if (isOpen && inputKey.trim() && provider === 'hormouz') {
+      fetchModels(inputKey.trim());
+    }
+  }, [isOpen, provider]);
+
+  const fetchModels = async (key: string) => {
+    if (!key.trim()) return;
+    setIsLoadingModels(true);
+    try {
+      const res = await fetch('/api/list-models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: key.trim(),
+          baseUrl: inputBaseUrl.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.models)) {
+        setAllowedModels(data.models);
+      }
+    } catch (_) {
+    } finally {
+      setIsLoadingModels(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   const handleTestKey = async () => {
@@ -76,6 +109,10 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
       });
 
       const data = await response.json();
+      if (Array.isArray(data.allowedModels) && data.allowedModels.length > 0) {
+        setAllowedModels(data.allowedModels);
+      }
+
       if (response.ok && data.success) {
         setTestResult({
           success: true,
@@ -180,7 +217,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
               {provider === 'hormouz' ? 'کلید API هرمز (Hormouz API Key):' : 'کلید اختصاصی Google Gemini API:'}
             </span>
             <span className="text-[11px] text-slate-500 font-normal">
-              {provider === 'hormouz' ? 'دریافت شده از پنل هرمز' : 'دریافت شده از AI Studio'}
+              {provider === 'hormouz' ? 'دریافت شده از پنل app.hormouz.net' : 'دریافت شده از AI Studio'}
             </span>
           </label>
           <div className="relative">
@@ -191,7 +228,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                 setInputKey(e.target.value);
                 setTestResult(null);
               }}
-              placeholder={provider === 'hormouz' ? 'کلید اختصاصی هرمز...' : 'AIzaSy...'}
+              placeholder={provider === 'hormouz' ? 'کلید هرمز...' : 'AIzaSy...'}
               dir="ltr"
               className="w-full bg-slate-950 border border-slate-700 rounded-xl py-2.5 px-4 pl-12 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500 font-mono transition"
             />
@@ -227,12 +264,57 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
               />
             </div>
 
+            {/* Allowed Models on Key Section */}
+            {allowedModels.length > 0 && (
+              <div className="p-3 bg-blue-950/40 border border-blue-500/30 rounded-lg space-y-2">
+                <div className="flex items-center justify-between text-xs text-blue-300 font-semibold">
+                  <span className="flex items-center gap-1.5">
+                    <List className="w-3.5 h-3.5 text-blue-400" />
+                    <span>مدل‌های فعال روی کلید شما در هرمز (کلیک برای انتخاب):</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => fetchModels(inputKey)}
+                    className="p-1 hover:text-white transition"
+                    title="به‌روزرسانی لیست مدل‌ها"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isLoadingModels ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {allowedModels.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => {
+                        if (m.toLowerCase().includes('tts') || m.toLowerCase().includes('voice')) {
+                          setInputTtsModel(m);
+                        } else {
+                          setInputTransModel(m);
+                        }
+                      }}
+                      className={`text-[11px] px-2.5 py-1 rounded-md font-mono border transition ${
+                        inputTransModel === m || inputTtsModel === m
+                          ? 'bg-amber-500/20 border-amber-500/60 text-amber-300'
+                          : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200'
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Translation Model */}
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
                 <span className="flex items-center gap-1.5">
                   <Bot className="w-3.5 h-3.5 text-blue-400" />
                   <span>مدل ترجمه زیرنویس (Translation Model):</span>
+                </span>
+                <span className="text-[10px] text-slate-500">
+                  شناسه مدل فعال در هرمز
                 </span>
               </label>
               <input
@@ -242,29 +324,13 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                   setInputTransModel(e.target.value);
                   setTestResult(null);
                 }}
-                placeholder="OpenAI: GPT-6 Luna"
+                placeholder="مثلاً: gpt-4o یا openai/gpt-4o"
                 dir="ltr"
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-3 text-xs text-slate-200 placeholder:text-slate-600 font-mono focus:outline-none focus:border-amber-500 transition"
               />
-              {/* Quick tags */}
-              <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                <span className="text-[10px] text-slate-500">پیشنهادی:</span>
-                {[
-                  'OpenAI: GPT-6 Luna',
-                  'openai/gpt-4o',
-                  'openai/gpt-4o-mini',
-                  'deepseek-chat',
-                ].map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setInputTransModel(m)}
-                    className="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
+              <p className="text-[10px] text-amber-400/90 leading-relaxed">
+                ⚠️ اگر ارور ۴۰۳ دریافت کردید، بررسی کنید در پنل هرمز (app.hormouz.net/keys) تیک مجاز بودن کدام مدل چت/ترجمه برای این کلید فعال است و نام دقیق آن را اینجا قرار دهید.
+              </p>
             </div>
 
             {/* TTS Model */}
@@ -303,7 +369,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
         {/* Test Result Message */}
         {testResult && (
           <div
-            className={`p-3 rounded-xl mb-4 text-xs flex items-start gap-2.5 border ${
+            className={`p-3 rounded-xl mb-4 text-xs flex items-start gap-2.5 border whitespace-pre-line leading-relaxed ${
               testResult.success
                 ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
                 : 'bg-rose-950/50 border-rose-500/40 text-rose-300'
@@ -314,7 +380,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             ) : (
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
             )}
-            <span className="leading-relaxed">{testResult.message}</span>
+            <span>{testResult.message}</span>
           </div>
         )}
 
