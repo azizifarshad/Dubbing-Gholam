@@ -25,9 +25,18 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  // 1. API Key State
+  // 1. API Key & Provider State
   const [apiKey, setApiKey] = useState<string>(() => {
-    return localStorage.getItem('persian_dub_gemini_key') || '';
+    return localStorage.getItem('persian_dub_api_key') || localStorage.getItem('persian_dub_gemini_key') || '';
+  });
+  const [baseUrl, setBaseUrl] = useState<string>(() => {
+    return localStorage.getItem('persian_dub_base_url') || 'https://api.hormouz.net/v1';
+  });
+  const [translationModel, setTranslationModel] = useState<string>(() => {
+    return localStorage.getItem('persian_dub_translation_model') || 'OpenAI: GPT-6 Luna';
+  });
+  const [ttsModel, setTtsModel] = useState<string>(() => {
+    return localStorage.getItem('persian_dub_tts_model') || 'google/gemini-3.8-flash-lite-tts';
   });
   const [hasEnvKey, setHasEnvKey] = useState<boolean>(false);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
@@ -61,7 +70,13 @@ export default function App() {
     fetch('/api/check-key', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: apiKey.trim() }),
+      body: JSON.stringify({
+        apiKey: apiKey.trim(),
+        baseUrl: baseUrl.trim(),
+        translationModel: translationModel.trim(),
+        ttsModel: ttsModel.trim(),
+        validateLive: false,
+      }),
     })
       .then((res) => res.json())
       .then((data) => {
@@ -70,14 +85,34 @@ export default function App() {
         }
       })
       .catch((_) => {});
-  }, [apiKey]);
+  }, [apiKey, baseUrl, translationModel, ttsModel]);
 
-  const handleSaveApiKey = (newKey: string) => {
+  const handleSaveApiKey = (
+    newKey: string,
+    newBaseUrl?: string,
+    newTransModel?: string,
+    newTtsModel?: string
+  ) => {
     setApiKey(newKey);
     if (newKey) {
+      localStorage.setItem('persian_dub_api_key', newKey);
       localStorage.setItem('persian_dub_gemini_key', newKey);
     } else {
+      localStorage.removeItem('persian_dub_api_key');
       localStorage.removeItem('persian_dub_gemini_key');
+    }
+
+    if (newBaseUrl) {
+      setBaseUrl(newBaseUrl);
+      localStorage.setItem('persian_dub_base_url', newBaseUrl);
+    }
+    if (newTransModel) {
+      setTranslationModel(newTransModel);
+      localStorage.setItem('persian_dub_translation_model', newTransModel);
+    }
+    if (newTtsModel) {
+      setTtsModel(newTtsModel);
+      localStorage.setItem('persian_dub_tts_model', newTtsModel);
     }
   };
 
@@ -239,6 +274,7 @@ export default function App() {
           <div className={activeStep === 1 || viewMode === 'all' ? 'block' : 'hidden'}>
             <FileUploaderSection
               apiKey={apiKey}
+              baseUrl={baseUrl}
               hasEnvKey={hasEnvKey}
               onOpenApiKeyModal={() => setIsApiKeyModalOpen(true)}
               subtitles={subtitles}
@@ -256,6 +292,8 @@ export default function App() {
           <div className={activeStep === 2 || viewMode === 'all' ? 'block' : 'hidden'}>
             <TranslationStudio
               apiKey={apiKey}
+              baseUrl={baseUrl}
+              translationModel={translationModel}
               subtitles={subtitles}
               onUpdateSubtitle={handleUpdateSubtitle}
               onUpdateAllSubtitles={handleUpdateAllSubtitles}
@@ -268,6 +306,8 @@ export default function App() {
           <div className={activeStep === 3 || viewMode === 'all' ? 'block' : 'hidden'}>
             <VoiceSynthesisStudio
               apiKey={apiKey}
+              baseUrl={baseUrl}
+              ttsModel={ttsModel}
               subtitles={subtitles}
               onUpdateSubtitle={handleUpdateSubtitle}
               onUpdateAllSubtitles={handleUpdateAllSubtitles}
@@ -375,6 +415,9 @@ export default function App() {
         isOpen={isApiKeyModalOpen}
         onClose={() => setIsApiKeyModalOpen(false)}
         apiKey={apiKey}
+        baseUrl={baseUrl}
+        translationModel={translationModel}
+        ttsModel={ttsModel}
         onSaveApiKey={handleSaveApiKey}
         hasEnvKey={hasEnvKey}
       />

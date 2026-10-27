@@ -26,6 +26,8 @@ import { generateOfflineSpeechAudio, speakTextWithBrowser, stopBrowserSpeech } f
 
 interface VoiceSynthesisStudioProps {
   apiKey: string;
+  baseUrl?: string;
+  ttsModel?: string;
   subtitles: SubtitleItem[];
   onUpdateSubtitle: (id: number, partial: Partial<SubtitleItem>) => void;
   onUpdateAllSubtitles: (items: SubtitleItem[]) => void;
@@ -43,6 +45,8 @@ interface CountdownState {
 
 export const VoiceSynthesisStudio: React.FC<VoiceSynthesisStudioProps> = ({
   apiKey,
+  baseUrl,
+  ttsModel,
   subtitles,
   onUpdateSubtitle,
   onUpdateAllSubtitles,
@@ -202,7 +206,9 @@ export const VoiceSynthesisStudio: React.FC<VoiceSynthesisStudioProps> = ({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(apiKey ? { 'x-gemini-api-key': apiKey } : {}),
+            ...(apiKey ? { 'x-api-key': apiKey, 'x-gemini-api-key': apiKey } : {}),
+            ...(baseUrl ? { 'x-base-url': baseUrl } : {}),
+            ...(ttsModel ? { 'x-tts-model': ttsModel } : {}),
           },
           body: JSON.stringify({
             text: sub.farsiText.trim(),
@@ -210,6 +216,8 @@ export const VoiceSynthesisStudio: React.FC<VoiceSynthesisStudioProps> = ({
             persona: selectedPersonaId,
             emotion: sub.emotion,
             apiKey,
+            baseUrl,
+            ttsModel,
           }),
         });
 

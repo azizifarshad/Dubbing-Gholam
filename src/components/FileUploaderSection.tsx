@@ -44,6 +44,7 @@ import { extractCleanBaseName } from '../utils/fileNaming';
 
 interface FileUploaderSectionProps {
   apiKey: string;
+  baseUrl?: string;
   hasEnvKey: boolean;
   onOpenApiKeyModal: () => void;
   subtitles: SubtitleItem[];
@@ -58,6 +59,7 @@ interface FileUploaderSectionProps {
 
 export const FileUploaderSection: React.FC<FileUploaderSectionProps> = ({
   apiKey,
+  baseUrl,
   hasEnvKey,
   onOpenApiKeyModal,
   subtitles,

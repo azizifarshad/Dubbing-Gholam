@@ -423,17 +423,82 @@ Requirements:
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Helper to check if a key is a real Gemini key (not empty or default template placeholder)
+// Helper to check if a key is a real key (not empty or default template placeholder)
 function isValidApiKey(key?: string): boolean {
   if (!key) return false;
   const k = key.trim();
-  if (k === '' || k === 'MY_GEMINI_API_KEY' || k.length < 15) return false;
+  if (k === '' || k === 'MY_GEMINI_API_KEY' || k.length < 5) return false;
   return true;
+}
+
+export interface ApiRuntimeConfig {
+  apiKey: string;
+  baseUrl: string;
+  translationModel: string;
+  ttsModel: string;
+  isHormouzOrOpenAI: boolean;
+  isGeminiDirect: boolean;
+  hasKey: boolean;
+}
+
+// Helper to extract API configuration from request or environment
+function getApiConfig(req: Request): ApiRuntimeConfig {
+  const customKey = (
+    req.body?.apiKey ||
+    req.headers['x-api-key'] ||
+    req.headers['x-gemini-api-key'] ||
+    req.query?.apiKey
+  ) as string | undefined;
+
+  const customBaseUrl = (
+    req.body?.baseUrl ||
+    req.body?.apiBaseUrl ||
+    req.headers['x-base-url']
+  ) as string | undefined;
+
+  const customTranslationModel = (
+    req.body?.translationModel ||
+    req.headers['x-translation-model']
+  ) as string | undefined;
+
+  const customTtsModel = (
+    req.body?.ttsModel ||
+    req.headers['x-tts-model']
+  ) as string | undefined;
+
+  const envKey = (
+    process.env.HORMOUZ_API_KEY ||
+    process.env.API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    ''
+  ).trim();
+
+  const apiKey = (customKey && customKey.trim()) || envKey;
+  const rawBaseUrl = (customBaseUrl && customBaseUrl.trim()) || process.env.API_BASE_URL || 'https://api.hormouz.net/v1';
+  const cleanBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+
+  const translationModel = (customTranslationModel && customTranslationModel.trim()) || process.env.TRANSLATION_MODEL || 'OpenAI: GPT-6 Luna';
+  const ttsModel = (customTtsModel && customTtsModel.trim()) || process.env.TTS_MODEL || 'google/gemini-3.8-flash-lite-tts';
+
+  const isGeminiDirect = apiKey.startsWith('AIzaSy') && (!customBaseUrl || cleanBaseUrl.includes('googleapis.com'));
+  const isHormouzOrOpenAI = Boolean(cleanBaseUrl && !isGeminiDirect);
+
+  return {
+    apiKey,
+    baseUrl: cleanBaseUrl,
+    translationModel,
+    ttsModel,
+    isHormouzOrOpenAI,
+    isGeminiDirect,
+    hasKey: isValidApiKey(apiKey),
+  };
 }
 
 // Helper to determine the effective key
 function getEffectiveKey(customApiKey?: string): string | null {
   if (isValidApiKey(customApiKey)) return customApiKey!.trim();
+  if (isValidApiKey(process.env.HORMOUZ_API_KEY)) return process.env.HORMOUZ_API_KEY!.trim();
+  if (isValidApiKey(process.env.API_KEY)) return process.env.API_KEY!.trim();
   if (isValidApiKey(process.env.GEMINI_API_KEY)) return process.env.GEMINI_API_KEY!.trim();
   return null;
 }
@@ -442,7 +507,7 @@ function getEffectiveKey(customApiKey?: string): string | null {
 function getGenAIClient(customApiKey?: string): GoogleGenAI {
   const apiKey = getEffectiveKey(customApiKey);
   if (!apiKey) {
-    throw new Error('کلید API وارد نشده است یا نامعتبر می‌باشد. لطفاً کلید معتبر Google Gemini API خود را وارد نمایید.');
+    throw new Error('کلید API وارد نشده است یا نامعتبر می‌باشد.');
   }
 
   return new GoogleGenAI({
@@ -453,6 +518,206 @@ function getGenAIClient(customApiKey?: string): GoogleGenAI {
       },
     },
   });
+}
+
+// Global style instructions for dubbing
+const STYLE_INSTRUCTIONS: Record<string, string> = {
+  colloquial: 'محاوره‌ای صمیمی، گفتاری و روان (دوبلاژ فیلم‌های رئال و ویدیوهای آموزشی با کلمات شکسته مانند: می‌ریم، ببین، قراره، انجام بدیم، اینه، چیه)',
+  cinematic: 'سینمایی، استاندارد و محاوره‌ای فاخر با حس هنری بالا مناسب فیلم‌های درام و هالیوودی',
+  formal: 'نیمه‌رسمی و دقیق مناسب فیلم‌های مستند و علمی، اما با روانی کامل و بدون جملات سنگین',
+  energetic: 'پرهیجان، پرانرژی و اکشن مناسب برای انیمیشن‌ها و ویدیوهای آموزشی پرانرژی',
+};
+
+// Global prompt builder for subtitles
+function buildPromptForLines(subsetLines: Array<any>, style: string = 'colloquial'): string {
+  const selectedStyle = STYLE_INSTRUCTIONS[style] || STYLE_INSTRUCTIONS.colloquial;
+
+  return `You are a professional English-to-Persian translator specializing in programming, computer science, software development, AI, and educational content.
+
+Your task is to translate English text into natural, concise, conversational Persian that sounds like a native Persian-speaking instructor explaining a topic, not someone reading from a textbook.
+
+Tone and Dubbing Style: ${selectedStyle}
+
+### 1. Natural, Conversational Persian (Instructor Style - مدرس ایرانی)
+- Use simple, modern, fluent, conversational Persian.
+- Make the translation sound natural when spoken aloud in educational videos and voiceovers (e.g. use spoken conversational forms: "توی این درس می‌خوایم...", "سلام مو هستم خوش اومدید", "قراره بررسی کنیم", "می‌ریم سراغ...").
+- Avoid overly formal, literary, bookish, or unnatural phrasing (do NOT write stiff literal text like "دوباره مو هستم" or "ما قصد داریم").
+- Preserve the original meaning while restructuring sentences when necessary to make them sound natural in Persian.
+- Prefer everyday spoken expressions over formal equivalents whenever appropriate.
+
+### 2. Strict Word Count, Conciseness & Completeness (DO NOT DROP CLAUSES)
+- Use the fewest words possible while preserving the complete meaning.
+- CRITICAL: Never cut off, omit, or delete parts of the sentence! If an English sentence has multiple clauses or ideas, ALL clauses must be translated and conveyed clearly.
+- Avoid unnecessary explanations, filler words, redundant phrases, and repetitions.
+- The Persian translation must NOT contain more than 120% of the words of the original English text.
+- Treat this budget as a guideline for conciseness: before returning the translation, check the word count.
+- Whenever two translations are equally accurate, choose the shorter, punchier one.
+- Never remove important technical details, conditions, examples, warnings, or logical relationships just to meet the word limit.
+- Prioritize semantic accuracy and completeness while remaining as concise as possible.
+
+### 3. Preserve Technical Terminology in English
+- Keep established technical terms from computer science, programming, AI, networking, software engineering, and web development in their original English form (e.g. Magic Method, Class, Object, Function, Framework, API, Endpoint, Debugging, Runtime, Callback, Middleware, Machine Learning, Neural Network, Token, Prompt, Array, String, Loop, Database, Query, Frontend, Backend, Fullstack, Docker, Linux, VS Code).
+- Do not translate an entire sentence into English. Keep the surrounding explanation in natural Persian while retaining technical terms in English.
+
+### 4. Semantic Accuracy & Completeness
+- Preserve the original meaning, intent, technical accuracy, and logical relationships.
+- Do not omit important details, examples, conditions, warnings, or second clauses.
+- Preserve names, numbers, values, code, and technical references accurately.
+
+### 5. Output Rules
+- You MUST return a JSON object with a single key "translations", which is an array of objects.
+- Each object must have:
+  "id": segment integer ID
+  "farsiText": natural fluent Persian translation
+- DO NOT wrap in Markdown backticks. Output valid JSON only.
+
+Lines to translate:
+${JSON.stringify(
+  subsetLines.map((s) => ({
+    id: s.id,
+    englishText: s.text,
+    durationSeconds: s.duration,
+    englishWordCount: s.englishWordCount,
+    maxPersianWordsAllowed: s.maxBudgetWords,
+  })),
+  null,
+  2
+)}
+`;
+}
+
+// Hormouz AI (or OpenAI-compatible) translation runner
+async function translateWithHormouz(
+  lines: Array<{ id: number; text: string; start: number; end: number; duration: number; englishWordCount: number; maxBudgetWords: number }>,
+  style: string,
+  config: ApiRuntimeConfig
+): Promise<Array<{ id: number; farsiText: string; characterEmotion?: string; suggestedGender?: string }>> {
+  const CHUNK_SIZE = 20;
+  const allTranslations: Array<{ id: number; farsiText: string; characterEmotion?: string; suggestedGender?: string }> = [];
+
+  for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
+    const chunk = lines.slice(i, i + CHUNK_SIZE);
+    const promptText = buildPromptForLines(chunk, style);
+
+    console.log(`[Hormouz Translate] Requesting model "${config.translationModel}" at ${config.baseUrl} for lines ${chunk[0].id}..${chunk[chunk.length - 1].id}...`);
+
+    let responseData: any = null;
+    let lastErr: any = null;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(`${config.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: config.translationModel,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are an expert English-to-Persian translator for video dubbing. You MUST reply with valid JSON only adhering strictly to {"translations": [{"id": 1, "farsiText": "..."}]}. Never output conversational chatter or markdown fences outside the JSON.',
+              },
+              {
+                role: 'user',
+                content: promptText,
+              },
+            ],
+            temperature: 0.3,
+          }),
+          signal: AbortSignal.timeout(60000),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          let parsedErr: any;
+          try { parsedErr = JSON.parse(errText); } catch {}
+          const msg = parsedErr?.error?.message || parsedErr?.message || errText;
+          throw new Error(`خطای سرور هرمز (${res.status}): ${msg}`);
+        }
+
+        responseData = await res.json();
+        break;
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`[Hormouz Translate Attempt ${attempt + 1}] error:`, err?.message);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+
+    if (!responseData) {
+      throw lastErr || new Error('پاسخی از مدل ترجمه هرمز دریافت نشد.');
+    }
+
+    const rawContent = responseData.choices?.[0]?.message?.content || '';
+    let parsed: any;
+    try {
+      const cleaned = rawContent.replace(/^\`\`\`json\s*/i, '').replace(/\`\`\`\s*$/, '').trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      const match = rawContent.match(/\{[\s\S]*\}/);
+      if (match) {
+        parsed = JSON.parse(match[0]);
+      } else {
+        throw new Error('قالب پاسخ ترجمه هرمز معتبر نبود.');
+      }
+    }
+
+    if (Array.isArray(parsed?.translations) && parsed.translations.length > 0) {
+      allTranslations.push(...parsed.translations);
+    } else if (Array.isArray(parsed) && parsed.length > 0) {
+      allTranslations.push(...parsed);
+    } else {
+      throw new Error('آرایه ترجمه‌ها در خروجی هوش مصنوعی یافت نشد.');
+    }
+  }
+
+  return allTranslations;
+}
+
+// Hormouz AI (or OpenAI-compatible) Speech / TTS runner
+async function ttsWithHormouz(
+  text: string,
+  voice: string,
+  config: ApiRuntimeConfig
+): Promise<{ audioBase64: string; mimeType: string }> {
+  console.log(`[Hormouz TTS] Generating voice with model "${config.ttsModel}" and voice "${voice}" at ${config.baseUrl}...`);
+
+  const res = await fetch(`${config.baseUrl}/audio/speech`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.ttsModel,
+      input: text.trim(),
+      voice: voice || 'Puck',
+      response_format: 'mp3',
+    }),
+    signal: AbortSignal.timeout(45000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    let parsedErr: any;
+    try { parsedErr = JSON.parse(errText); } catch {}
+    const msg = parsedErr?.error?.message || parsedErr?.message || errText;
+    throw new Error(`خطای سرویس صوتی هرمز (${res.status}): ${msg}`);
+  }
+
+  const arrayBuffer = await res.arrayBuffer();
+  if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+    throw new Error('فایل صوتی خالی از سرویس هرمز دریافت شد.');
+  }
+
+  const audioBase64 = Buffer.from(arrayBuffer).toString('base64');
+  return {
+    audioBase64,
+    mimeType: 'audio/mp3',
+  };
 }
 
 // Helper to check for auth errors
@@ -616,38 +881,82 @@ function generateColloquialTranslation(rawText: string): string {
 
 // 1. Check API Key validity
 app.post('/api/check-key', async (req: Request, res: Response) => {
-  const customKey = req.body.apiKey || (req.headers['x-gemini-api-key'] as string);
-  const effectiveKey = getEffectiveKey(customKey);
-  const hasEnvKey = isValidApiKey(process.env.GEMINI_API_KEY);
+  const config = getApiConfig(req);
   const validateLive = req.body.validateLive === true;
+  const hasEnv = isValidApiKey(process.env.HORMOUZ_API_KEY) || isValidApiKey(process.env.GEMINI_API_KEY);
 
-  // If no real API key is available yet, respond without calling the external API
-  if (!effectiveKey) {
+  if (!config.hasKey) {
     return res.json({
       success: false,
-      hasEnvKey,
+      hasEnvKey: hasEnv,
       isConfigured: false,
-      message: 'کلید API هنوز وارد نشده است. لطفاً کلید Gemini API خود را وارد کنید.',
+      message: 'کلید API هنوز وارد نشده است. لطفاً کلید API خود را وارد کنید.',
     });
   }
 
-  // If live network ping is not requested (e.g. on page mount), validate format only to preserve daily quota
   if (!validateLive) {
     return res.json({
       success: true,
-      hasEnvKey,
+      hasEnvKey: hasEnv,
       isConfigured: true,
+      provider: config.isHormouzOrOpenAI ? 'hormouz' : 'gemini',
       message: 'کلید API ثبت شده است.',
     });
   }
 
-  // Live test using model fallback chain
+  // Live test for Hormouz AI or OpenAI-compatible endpoint
+  if (config.isHormouzOrOpenAI) {
+    try {
+      console.log(`[Hormouz Check] Testing ${config.baseUrl}/chat/completions with model ${config.translationModel}...`);
+      const testRes = await fetch(`${config.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: config.translationModel,
+          messages: [{ role: 'user', content: 'Ping test. Reply with OK.' }],
+          max_tokens: 5,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (testRes.ok) {
+        return res.json({
+          success: true,
+          isConfigured: true,
+          provider: 'hormouz',
+          testedModel: config.translationModel,
+          message: `اتصال به هوش مصنوعی هرمز با مدل «${config.translationModel}» با موفقیت برقرار شد!`,
+        });
+      } else {
+        const errText = await testRes.text();
+        let parsedErr: any;
+        try { parsedErr = JSON.parse(errText); } catch {}
+        const msg = parsedErr?.error?.message || parsedErr?.message || errText;
+        return res.status(testRes.status === 401 ? 401 : 400).json({
+          success: false,
+          hasEnvKey: hasEnv,
+          error: `خطا در اتصال به هرمز (${testRes.status}): ${msg}`,
+        });
+      }
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        hasEnvKey: hasEnv,
+        error: `عدم برقراری ارتباط با ${config.baseUrl}: ${err.message}`,
+      });
+    }
+  }
+
+  // Live test using Google Gemini fallback chain
   const pingModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
   let lastError: any;
 
   for (const model of pingModels) {
     try {
-      const ai = getGenAIClient(customKey);
+      const ai = getGenAIClient(config.apiKey);
       const response = await ai.models.generateContent({
         model,
         contents: 'Ping test. Reply with OK.',
@@ -656,8 +965,9 @@ app.post('/api/check-key', async (req: Request, res: Response) => {
       return res.json({
         success: true,
         isConfigured: true,
+        provider: 'gemini',
         message: 'کلید API معتبر است و ارتباط با جمینای با موفقیت برقرار شد.',
-        hasEnvKey,
+        hasEnvKey: hasEnv,
         testedModel: model,
         sampleResponse: response.text?.trim() || 'OK',
       });
@@ -666,9 +976,9 @@ app.post('/api/check-key', async (req: Request, res: Response) => {
       if (isAuthenticationError(error)) {
         return res.status(401).json({
           success: false,
-          hasEnvKey,
+          hasEnvKey: hasEnv,
           isAuthError: true,
-          error: 'کلید API وارد شده معتبر نمی‌باشد. لطفاً یک کلید معتبر از Google AI Studio وارد کنید.',
+          error: 'کلید API وارد شده معتبر نمی‌باشد. لطفاً یک کلید معتبر وارد کنید.',
         });
       }
       continue;
@@ -679,13 +989,11 @@ app.post('/api/check-key', async (req: Request, res: Response) => {
   const { isRateLimited, isDailyLimit, retryAfterSeconds } = extractRateLimitInfo(lastError);
   return res.status(isRateLimited ? 429 : 400).json({
     success: false,
-    hasEnvKey,
+    hasEnvKey: hasEnv,
     isRateLimited,
     isDailyLimit,
     retryAfterSeconds,
-    error: isDailyLimit
-      ? 'سهمیه روزانه پلن رایگان این کلید موقتاً تکمیل شده است. لطفاً یک کلید جدید یا دارای Billing در بخش تنظیمات وارد نمایید.'
-      : lastError?.message || 'اعتبارسنجی کلید API ناموفق بود.',
+    error: lastError?.message || 'خطا در ارزیابی کلید API.',
   });
 });
 
@@ -810,22 +1118,67 @@ async function translateWithFallbackEngine(lines: Array<{ id: number; text: stri
 // 2. Translate English Subtitle Lines to Persian Dubbing Dialogue with High Speed & Semantic Clarity
 app.post('/api/translate-subtitles', async (req: Request, res: Response) => {
   const { lines, style = 'colloquial', context = '' } = req.body;
-  const customKey = req.body.apiKey || (req.headers['x-gemini-api-key'] as string);
+  const config = getApiConfig(req);
 
   if (!Array.isArray(lines) || lines.length === 0) {
     return res.status(400).json({ error: 'هیچ خط زیرنویسی ارسال نشده است.' });
   }
 
-  const simpleLines = lines.map((l: any) => ({
-    id: l.id,
-    text: (l.text || '').trim(),
-  }));
+  const selectedStyle = STYLE_INSTRUCTIONS[style] || STYLE_INSTRUCTIONS.colloquial;
+
+  // Format lines with word counts and 120% max budget without cutting off clauses
+  const simpleLines = lines.map((l: any) => {
+    const start = typeof l.start === 'number' ? l.start : 0;
+    const end = typeof l.end === 'number' ? l.end : 0;
+    const duration = typeof l.duration === 'number' ? l.duration : (end > start ? end - start : 2.5);
+    const enWords = (l.text || '').trim().split(/\s+/).filter(Boolean).length;
+    const maxBudgetWords = Math.max(enWords + 2, Math.ceil(enWords * 1.2));
+    return {
+      id: l.id,
+      text: (l.text || '').trim(),
+      start,
+      end,
+      duration: Number(duration.toFixed(1)),
+      englishWordCount: enWords,
+      maxBudgetWords,
+    };
+  });
+
+  // Branch A: Hormouz AI or OpenAI-compatible gateway
+  if (config.isHormouzOrOpenAI && config.hasKey) {
+    try {
+      const translations = await translateWithHormouz(simpleLines, selectedStyle, config);
+      return res.json({
+        success: true,
+        translations,
+        provider: 'hormouz',
+      });
+    } catch (hErr: any) {
+      console.warn(`[Translate] Hormouz error (${hErr?.message}). Falling back to local translation engine...`);
+      try {
+        const fallbackTranslations = await translateWithFallbackEngine(simpleLines, style);
+        if (fallbackTranslations && fallbackTranslations.length > 0) {
+          return res.json({
+            success: true,
+            translations: fallbackTranslations,
+            notice: 'ترجمه به زبان فارسی با موتور جایگزین و حفظ واژگان تخصصی با موفقیت انجام شد.',
+          });
+        }
+      } catch (fbErr) {
+        console.error('Fallback translation also failed:', fbErr);
+      }
+      return res.status(500).json({
+        success: false,
+        error: hErr?.message || 'خطا در ارتباط با سرویس ترجمه هرمز',
+      });
+    }
+  }
 
   let ai: GoogleGenAI | null = null;
   try {
-    ai = getGenAIClient(customKey);
+    ai = getGenAIClient(config.apiKey);
   } catch (keyErr) {
-    console.warn('[Translate] Gemini API key not available or invalid. Activating high-accuracy Persian translation engine...');
+    console.warn('[Translate] API key not available or invalid. Activating high-accuracy Persian translation engine...');
     try {
       const fallbackTranslations = await translateWithFallbackEngine(simpleLines, style);
       return res.json({
@@ -839,34 +1192,6 @@ app.post('/api/translate-subtitles', async (req: Request, res: Response) => {
   }
 
   try {
-    const styleInstructions: Record<string, string> = {
-      colloquial: 'محاوره‌ای صمیمی، گفتاری و روان (دوبلاژ فیلم‌های رئال و ویدیوهای آموزشی با کلمات شکسته مانند: می‌ریم، ببین، قراره، انجام بدیم، اینه، چیه)',
-      cinematic: 'سینمایی، استاندارد و محاوره‌ای فاخر با حس هنری بالا مناسب فیلم‌های درام و هالیوودی',
-      formal: 'نیمه‌رسمی و دقیق مناسب فیلم‌های مستند و علمی، اما با روانی کامل و بدون جملات سنگین',
-      energetic: 'پرهیجان، پرانرژی و اکشن مناسب برای انیمیشن‌ها و ویدیوهای آموزشی پرانرژی',
-    };
-
-    const selectedStyle = styleInstructions[style] || styleInstructions.colloquial;
-
-    // Format lines with word counts and 120% max budget without cutting off clauses
-    const simpleLines = lines.map((l: any) => {
-      const start = typeof l.start === 'number' ? l.start : 0;
-      const end = typeof l.end === 'number' ? l.end : 0;
-      const duration = typeof l.duration === 'number' ? l.duration : (end > start ? end - start : 2.5);
-      const enWords = (l.text || '').trim().split(/\s+/).filter(Boolean).length;
-      // Word count budget: Persian must not exceed 120% of English words.
-      // NEVER truncate or omit parts of the sentence to meet the limit!
-      const maxBudgetWords = Math.max(enWords + 2, Math.ceil(enWords * 1.2));
-      return {
-        id: l.id,
-        text: (l.text || '').trim(),
-        start,
-        end,
-        duration: Number(duration.toFixed(1)),
-        englishWordCount: enWords,
-        maxBudgetWords,
-      };
-    });
 
     const buildPromptForLines = (subsetLines: Array<any>) => `You are a professional English-to-Persian translator specializing in programming, computer science, software development, AI, and educational content.
 
@@ -1208,13 +1533,36 @@ app.post('/api/tts', async (req: Request, res: Response) => {
   const startTime = Date.now();
   try {
     const { text, voice, emotion = '', style = '', persona = 'patient_teacher' } = req.body;
-    const customKey = req.body.apiKey || (req.headers['x-gemini-api-key'] as string);
+    const config = getApiConfig(req);
 
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'متن برای تولید صوت الزامی است.' });
     }
 
-    const ai = getGenAIClient(customKey);
+    // Branch A: Hormouz AI or OpenAI-compatible Speech API
+    if (config.isHormouzOrOpenAI && config.hasKey) {
+      try {
+        const hormouzResult = await ttsWithHormouz(text, voice, config);
+        const durationMs = Date.now() - startTime;
+        return res.json({
+          success: true,
+          audioBase64: hormouzResult.audioBase64,
+          mimeType: hormouzResult.mimeType || 'audio/mp3',
+          voice: voice || 'Puck',
+          modelUsed: config.ttsModel,
+          latencyMs: durationMs,
+        });
+      } catch (ttsErr: any) {
+        console.error('[Hormouz TTS Error]:', ttsErr?.message);
+        return res.status(500).json({
+          success: false,
+          error: ttsErr?.message || 'خطا در ارتباط با سرویس صوتی هرمز',
+        });
+      }
+    }
+
+    // Branch B: Direct Google Gemini TTS
+    const ai = getGenAIClient(config.apiKey);
 
     // Persona styles customized specifically for top-tier Online Educational Courses (4 Male, 2 Female)
     // Enforces pedagogical clarity, crisp pronunciation of technical terms, and completely eliminates theatrical or radio tones.

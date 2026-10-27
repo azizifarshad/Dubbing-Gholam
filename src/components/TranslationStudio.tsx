@@ -5,6 +5,8 @@ import { translateOfflineLocally } from '../utils/localTranslator';
 
 interface TranslationStudioProps {
   apiKey: string;
+  baseUrl?: string;
+  translationModel?: string;
   subtitles: SubtitleItem[];
   onUpdateSubtitle: (id: number, partial: Partial<SubtitleItem>) => void;
   onUpdateAllSubtitles: (items: SubtitleItem[]) => void;
@@ -14,6 +16,8 @@ interface TranslationStudioProps {
 
 export const TranslationStudio: React.FC<TranslationStudioProps> = ({
   apiKey,
+  baseUrl,
+  translationModel,
   subtitles,
   onUpdateSubtitle,
   onUpdateAllSubtitles,
@@ -107,12 +111,16 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(apiKey ? { 'x-gemini-api-key': apiKey } : {}),
+            ...(apiKey ? { 'x-api-key': apiKey, 'x-gemini-api-key': apiKey } : {}),
+            ...(baseUrl ? { 'x-base-url': baseUrl } : {}),
+            ...(translationModel ? { 'x-translation-model': translationModel } : {}),
           },
           body: JSON.stringify({
             lines: payloadLines,
             style: selectedStyle,
             apiKey,
+            baseUrl,
+            translationModel,
           }),
         });
 
@@ -217,7 +225,9 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(apiKey ? { 'x-gemini-api-key': apiKey } : {}),
+            ...(apiKey ? { 'x-api-key': apiKey, 'x-gemini-api-key': apiKey } : {}),
+            ...(baseUrl ? { 'x-base-url': baseUrl } : {}),
+            ...(translationModel ? { 'x-translation-model': translationModel } : {}),
           },
           body: JSON.stringify({
             lines: [
@@ -231,6 +241,8 @@ export const TranslationStudio: React.FC<TranslationStudioProps> = ({
             ],
             style: selectedStyle,
             apiKey,
+            baseUrl,
+            translationModel,
           }),
         });
 

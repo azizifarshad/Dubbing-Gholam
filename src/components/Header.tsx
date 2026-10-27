@@ -28,7 +28,7 @@ export const Header: React.FC<HeaderProps> = ({
                 استودیو دوبله هوشمند فارسی
               </h1>
               <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 font-medium">
-                Gemini 3.8 AI
+                هرمز / AI Studio
               </span>
             </div>
             <p className="text-xs text-slate-400">
@@ -62,7 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <Key className="w-4 h-4" />
-            <span>{hasApiKey ? 'کلید API متصل است' : 'تنظیم کلید Gemini API'}</span>
+            <span>{hasApiKey ? 'کلید API متصل است' : 'تنظیم کلید API'}</span>
             {hasApiKey ? (
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
             ) : (
